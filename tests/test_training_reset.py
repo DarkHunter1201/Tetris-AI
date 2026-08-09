@@ -1,12 +1,15 @@
 import shutil
+import time
 import unittest
 import uuid
 from dataclasses import replace
+from unittest.mock import patch
 
 import torch
 
 from tetris_ai.checkpoint import CheckpointManager, TrainingCheckpoint
 from tetris_ai.config import CONFIG
+from tetris_ai.device import DeviceProfile
 from tetris_ai.paths import RUNTIME_PATHS, ensure_inside_project
 from tetris_ai.state import SharedTrainingState
 from tetris_ai.trainer import Trainer
@@ -18,7 +21,7 @@ class TrainingResetTests(unittest.TestCase):
         self.directory.mkdir(parents=True)
         self.manager = CheckpointManager(self.directory / "training.pt")
         self.shared = SharedTrainingState()
-        config = replace(CONFIG, population_size=8, elite_count=2, parent_pool_size=4, hidden_sizes=(8,))
+        config = replace(CONFIG, population_size=8, elite_count=2, parent_pool_size=4, hidden_sizes=(8,), max_pieces_per_game=2, evaluation_chunk_size=4)
         self.trainer = Trainer(config, self.manager, self.shared)
 
     def tearDown(self):
@@ -64,7 +67,37 @@ class TrainingResetTests(unittest.TestCase):
     def test_reset_request_sets_worker_event(self):
         self.trainer.request_reset()
         self.assertTrue(self.trainer.reset_event.is_set())
+        self.assertTrue(self.trainer.pause_event.is_set())
+        self.assertTrue(self.shared.snapshot().paused)
         self.assertEqual(self.shared.snapshot().status, "Reset requested")
+
+    def test_pause_and_resume_requests(self):
+        self.trainer.request_pause()
+        self.assertTrue(self.trainer.pause_event.is_set())
+        self.assertTrue(self.shared.snapshot().paused)
+        self.trainer.request_resume()
+        self.assertFalse(self.trainer.pause_event.is_set())
+        self.assertFalse(self.shared.snapshot().paused)
+
+    def test_reset_stays_paused_until_start(self):
+        cpu = DeviceProfile(torch.device("cpu"), "CPU", 0, 0, True)
+        self.trainer.pause_event.set()
+        with patch("tetris_ai.trainer.select_device_profile", return_value=cpu):
+            self.trainer.start(generation_limit=1)
+            deadline = time.monotonic() + 3.0
+            while self.shared.snapshot().status != "Paused" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.trainer.request_reset()
+            while self.shared.snapshot().status != "Paused · fresh start" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.trainer.generation, 0)
+            time.sleep(0.05)
+            self.assertEqual(self.trainer.generation, 0)
+            self.assertTrue(self.trainer.thread.is_alive())
+            self.trainer.request_resume()
+            self.trainer.join(3.0)
+        self.assertFalse(self.trainer.thread.is_alive())
+        self.assertEqual(self.trainer.generation, 1)
 
 
 if __name__ == "__main__":

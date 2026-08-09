@@ -16,6 +16,11 @@ class TrainingStats:
     error: str = ""
     device: str = "CPU"
     genome_revision: int = 0
+    paused: bool = False
+    rotation_rate: float = 0.0
+    vram_limit_mib: int = 0
+    total_vram_mib: int = 0
+    vram_automatic: bool = True
 
 
 class SharedTrainingState:
@@ -39,12 +44,13 @@ class SharedTrainingState:
             self.best_genome = immutable
             self.stats = replace(self.stats, genome_revision=revision, **values)
 
-    def reset_training(self, genome: torch.Tensor, device: str) -> None:
+    def reset_training(self, genome: torch.Tensor, device: str, paused: bool, vram_limit_mib: int, total_vram_mib: int, vram_automatic: bool) -> None:
         immutable = genome.detach().cpu().clone()
         with self.lock:
             revision = self.stats.genome_revision + 1
             self.best_genome = immutable
-            self.stats = TrainingStats(status="Training · fresh start", device=device, genome_revision=revision)
+            status = "Paused · fresh start" if paused else "Training · fresh start"
+            self.stats = TrainingStats(status=status, device=device, genome_revision=revision, paused=paused, vram_limit_mib=vram_limit_mib, total_vram_mib=total_vram_mib, vram_automatic=vram_automatic)
 
     def genome_snapshot(self) -> tuple[torch.Tensor | None, int]:
         with self.lock:

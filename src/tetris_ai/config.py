@@ -3,11 +3,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AppConfig:
-    version: str = "1.0.1 alpha"
+    version: str = "1.1.0 beta"
     board_width: int = 10
     board_height: int = 20
     population_size: int = 1500
-    neural_network_vram_limit_mib: int = 5000
+    neural_network_vram_limit_mib: int = 0
+    automatic_vram_fraction: float = 0.85
+    minimum_vram_limit_mib: int = 1024
+    gpu_reserve_mib: int = 1024
     hidden_sizes: tuple[int, ...] = (96, 64)
     output_size: int = 40
     elite_count: int = 30

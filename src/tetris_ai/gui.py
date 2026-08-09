@@ -24,6 +24,9 @@ MUTED = (143, 154, 177)
 ACCENT = (80, 200, 255)
 EXIT_COLOR = (224, 72, 91)
 RESET_COLOR = (226, 151, 52)
+PAUSE_COLOR = (72, 137, 224)
+START_COLOR = (57, 180, 112)
+INPUT_COLOR = (36, 43, 59)
 PIECE_COLORS = {
     1: (66, 214, 230),
     2: (244, 205, 70),
@@ -52,14 +55,14 @@ class DemoController:
         self.falling: FallingPiece | None = None
         self.last_drop = time.monotonic()
 
-    def update(self) -> None:
+    def update(self, paused: bool = False) -> None:
         genome, revision = self.shared.genome_snapshot()
         if genome is not None and revision != self.revision:
             self.genome = genome
             self.revision = revision
             self.game.reset(self.config.seed + revision * 103)
             self.falling = None
-        if self.genome is None:
+        if self.genome is None or paused:
             return
         now = time.monotonic()
         if self.falling is None:
@@ -89,56 +92,165 @@ class DemoController:
 
 
 class TetrisWindow:
-    def __init__(self, config: AppConfig, shared: SharedTrainingState, monitor: HardwareMonitor, spec: NetworkSpec, reset_training: Callable[[], None]):
+    def __init__(
+        self,
+        config: AppConfig,
+        shared: SharedTrainingState,
+        monitor: HardwareMonitor,
+        spec: NetworkSpec,
+        reset_training: Callable[[], None],
+        pause_training: Callable[[], None],
+        resume_training: Callable[[], None],
+        set_vram_limit: Callable[[int], None],
+    ):
         self.config = config
         self.shared = shared
         self.monitor = monitor
         self.reset_training = reset_training
+        self.pause_training = pause_training
+        self.resume_training = resume_training
+        self.set_vram_limit = set_vram_limit
         self.reset_armed_until = 0.0
         self.demo = DemoController(config, spec, shared)
         pygame.init()
         pygame.display.set_caption(f"Tetris AI {config.version}")
-        self.cell = 30
-        self.margin = 28
-        self.board_width = config.board_width * self.cell
-        self.board_height = config.board_height * self.cell
-        self.panel_width = 390
-        self.size = (self.margin * 3 + self.board_width + self.panel_width, self.margin * 2 + self.board_height)
-        self.screen = pygame.display.set_mode(self.size)
+        self.minimum_size = (860, 720)
+        self.size = (920, 760)
+        self.screen = pygame.display.set_mode(self.size, pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.title_font = pygame.font.SysFont("segoeui", 30, bold=True)
         self.section_font = pygame.font.SysFont("segoeui", 18, bold=True)
-        self.text_font = pygame.font.SysFont("consolas", 16)
+        self.text_font = pygame.font.SysFont("consolas", 15)
         self.small_font = pygame.font.SysFont("segoeui", 14)
-        button_x = self.margin * 2 + self.board_width + 28
-        button_y = self.size[1] - 76
-        self.reset_rect = pygame.Rect(button_x, button_y, 210, 48)
-        self.exit_rect = pygame.Rect(button_x + 222, button_y, 112, 48)
+        self.button_font = pygame.font.SysFont("segoeui", 16, bold=True)
+        self.margin = 28
+        self.cell = 30
+        self.board_origin = (self.margin, self.margin)
+        self.board_width = config.board_width * self.cell
+        self.board_height = config.board_height * self.cell
+        self.panel_rect = pygame.Rect(0, 0, 0, 0)
+        self.pause_rect = pygame.Rect(0, 0, 0, 0)
+        self.reset_rect = pygame.Rect(0, 0, 0, 0)
+        self.exit_rect = pygame.Rect(0, 0, 0, 0)
+        self.vram_slider_rect = pygame.Rect(0, 0, 0, 0)
+        self.vram_input_rect = pygame.Rect(0, 0, 0, 0)
+        self.vram_auto_rect = pygame.Rect(0, 0, 0, 0)
+        self.vram_dragging = False
+        self.vram_input_active = False
+        self.vram_input_value = ""
+        self.vram_preview_mib: int | None = None
+        self._layout()
 
     def run(self) -> None:
         running = True
         while running:
+            stats = self.shared.snapshot()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self.reset_rect.collidepoint(event.pos):
-                        self._handle_reset_click()
-                    if self.exit_rect.collidepoint(event.pos):
-                        running = False
-            self.demo.update()
-            self.draw()
+                elif event.type == pygame.VIDEORESIZE:
+                    width = max(self.minimum_size[0], event.w)
+                    height = max(self.minimum_size[1], event.h)
+                    self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+                    self._layout()
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self._handle_mouse_down(event.pos, stats)
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self._handle_mouse_up(stats)
+                elif event.type == pygame.MOUSEMOTION and self.vram_dragging:
+                    self.vram_preview_mib = self._slider_value(event.pos[0], stats)
+                elif event.type == pygame.KEYDOWN and self.vram_input_active:
+                    self._handle_vram_key(event, stats)
+            stats = self.shared.snapshot()
+            self.demo.update(stats.paused)
+            self.draw(stats)
             pygame.display.flip()
             self.clock.tick(self.config.visualization_fps)
 
-    def draw(self) -> None:
+    def _handle_mouse_down(self, position: tuple[int, int], stats: TrainingStats) -> None:
+        if self.pause_rect.collidepoint(position):
+            if stats.paused:
+                self.resume_training()
+            else:
+                self.pause_training()
+            return
+        if self.reset_rect.collidepoint(position):
+            self._handle_reset_click()
+            return
+        if self.exit_rect.collidepoint(position):
+            pygame.event.post(pygame.event.Event(pygame.QUIT))
+            return
+        if stats.total_vram_mib <= 0:
+            self.vram_input_active = False
+            return
+        if self.vram_auto_rect.collidepoint(position):
+            self.vram_preview_mib = None
+            self.vram_input_active = False
+            self.set_vram_limit(0)
+            return
+        if self.vram_input_rect.collidepoint(position):
+            self.vram_input_active = True
+            self.vram_input_value = str(stats.vram_limit_mib)
+            return
+        self.vram_input_active = False
+        if self.vram_slider_rect.inflate(0, 16).collidepoint(position):
+            self.vram_dragging = True
+            self.vram_preview_mib = self._slider_value(position[0], stats)
+
+    def _handle_mouse_up(self, stats: TrainingStats) -> None:
+        if not self.vram_dragging:
+            return
+        self.vram_dragging = False
+        if self.vram_preview_mib is not None and stats.total_vram_mib > 0:
+            self.set_vram_limit(self.vram_preview_mib)
+
+    def _handle_vram_key(self, event: pygame.event.Event, stats: TrainingStats) -> None:
+        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            if self.vram_input_value:
+                value = self._clamp_vram(int(self.vram_input_value), stats)
+                self.vram_preview_mib = value
+                self.set_vram_limit(value)
+            self.vram_input_active = False
+        elif event.key == pygame.K_ESCAPE:
+            self.vram_input_active = False
+        elif event.key == pygame.K_BACKSPACE:
+            self.vram_input_value = self.vram_input_value[:-1]
+        elif event.unicode.isdigit() and len(self.vram_input_value) < 6:
+            self.vram_input_value += event.unicode
+
+    def draw(self, stats: TrainingStats | None = None) -> None:
+        self._layout()
+        current = self.shared.snapshot() if stats is None else stats
         self.screen.fill(BACKGROUND)
         self._draw_board()
-        self._draw_panel(self.shared.snapshot(), self.monitor.snapshot())
+        self._draw_panel(current, self.monitor.snapshot())
+
+    def _layout(self) -> None:
+        width, height = self.screen.get_size()
+        self.margin = max(20, min(32, min(width, height) // 26))
+        panel_width = max(410, min(510, int(width * 0.48)))
+        left_width = width - panel_width - self.margin * 3
+        self.cell = max(14, min(left_width // self.config.board_width, (height - self.margin * 2) // self.config.board_height))
+        self.board_width = self.config.board_width * self.cell
+        self.board_height = self.config.board_height * self.cell
+        board_x = self.margin + max(0, (left_width - self.board_width) // 2)
+        board_y = max(self.margin, (height - self.board_height) // 2)
+        self.board_origin = (board_x, board_y)
+        panel_x = width - self.margin - panel_width
+        self.panel_rect = pygame.Rect(panel_x, self.margin, panel_width, height - self.margin * 2)
+        inner_x = panel_x + 24
+        inner_width = panel_width - 48
+        button_y = self.panel_rect.bottom - 60
+        gap = 10
+        pause_width = 100
+        exit_width = 90
+        reset_width = inner_width - pause_width - exit_width - gap * 2
+        self.pause_rect = pygame.Rect(inner_x, button_y, pause_width, 42)
+        self.reset_rect = pygame.Rect(inner_x + pause_width + gap, button_y, reset_width, 42)
+        self.exit_rect = pygame.Rect(self.reset_rect.right + gap, button_y, exit_width, 42)
 
     def _draw_board(self) -> None:
-        origin_x = self.margin
-        origin_y = self.margin
+        origin_x, origin_y = self.board_origin
         pygame.draw.rect(self.screen, BOARD_BACKGROUND, (origin_x, origin_y, self.board_width, self.board_height), border_radius=6)
         for y, row in enumerate(self.demo.game.board):
             for x, value in enumerate(row):
@@ -153,21 +265,21 @@ class TetrisWindow:
         rect = pygame.Rect(origin_x + x * self.cell, origin_y + y * self.cell, self.cell, self.cell)
         pygame.draw.rect(self.screen, GRID, rect, 1)
         if value:
-            inner = rect.inflate(-4, -4)
+            inset = max(2, self.cell // 8)
+            inner = rect.inflate(-inset * 2, -inset * 2)
             color = PIECE_COLORS[value]
-            pygame.draw.rect(self.screen, color, inner, border_radius=4)
-            pygame.draw.line(self.screen, tuple(min(255, channel + 30) for channel in color), inner.topleft, inner.topright, 2)
+            pygame.draw.rect(self.screen, color, inner, border_radius=max(2, self.cell // 8))
+            pygame.draw.line(self.screen, tuple(min(255, channel + 30) for channel in color), inner.topleft, inner.topright, max(1, self.cell // 15))
 
     def _draw_panel(self, stats: TrainingStats, hardware: HardwareStats) -> None:
-        x = self.margin * 2 + self.board_width
-        panel_rect = pygame.Rect(x, self.margin, self.panel_width, self.board_height)
-        pygame.draw.rect(self.screen, PANEL, panel_rect, border_radius=10)
-        cursor_x = x + 28
-        cursor_y = self.margin + 24
+        pygame.draw.rect(self.screen, PANEL, self.panel_rect, border_radius=10)
+        cursor_x = self.panel_rect.x + 24
+        value_right = self.panel_rect.right - 24
+        cursor_y = self.panel_rect.y + 20
         self.screen.blit(self.title_font.render("Tetris AI", True, TEXT), (cursor_x, cursor_y))
-        cursor_y += 42
+        cursor_y += 38
         self.screen.blit(self.small_font.render(f"Version {self.config.version}  ·  Neuroevolution", True, ACCENT), (cursor_x, cursor_y))
-        cursor_y += 42
+        cursor_y += 34
         training_rows = [
             ("Generation", str(stats.generation)),
             ("Current best", self._number(stats.current_best_fitness)),
@@ -175,30 +287,74 @@ class TetrisWindow:
             ("Best score", str(stats.best_score)),
             ("Best lines", str(stats.best_lines)),
             ("Evaluated", f"{stats.evaluated_agents} / {self.config.population_size}"),
+            ("Rotated moves", f"{stats.rotation_rate:.1f} %"),
         ]
-        cursor_y = self._draw_rows(cursor_x, cursor_y, "TRAINING", training_rows)
+        cursor_y = self._draw_rows(cursor_x, cursor_y, value_right, "TRAINING", training_rows)
         hardware_rows = [
             ("CPU Load", f"{hardware.cpu_load:.0f} %"),
             ("RAM Load", f"{hardware.ram_load:.0f} %"),
             ("GPU Load", self._optional(hardware.gpu_load, " %")),
             ("GPU Temp", self._optional(hardware.gpu_temperature, " °C")),
-            ("Neural VRAM", f"{hardware.neural_allocated_mib:.0f} / {self.config.neural_network_vram_limit_mib} MiB" if stats.device.startswith("CUDA") else "N/A"),
-            ("Reserved VRAM", f"{hardware.neural_reserved_mib:.0f} MiB" if stats.device.startswith("CUDA") else "N/A"),
+            ("Neural VRAM", f"{hardware.neural_allocated_mib:.0f} / {stats.vram_limit_mib} MiB" if stats.total_vram_mib else "N/A"),
+            ("Reserved VRAM", f"{hardware.neural_reserved_mib:.0f} MiB" if stats.total_vram_mib else "N/A"),
             ("Total VRAM", self._vram(hardware)),
         ]
-        cursor_y = self._draw_rows(cursor_x, cursor_y + 8, "HARDWARE", hardware_rows)
-        device = hardware.gpu_name if stats.device.startswith("CUDA") and hardware.gpu_name else stats.device
+        cursor_y = self._draw_rows(cursor_x, cursor_y + 2, value_right, "HARDWARE", hardware_rows)
+        cursor_y = self._draw_vram_control(cursor_x, cursor_y + 2, value_right, stats)
+        device = hardware.gpu_name if stats.total_vram_mib and hardware.gpu_name else stats.device
         status_color = EXIT_COLOR if stats.error else ACCENT
-        self.screen.blit(self.small_font.render(f"Device: {device}", True, MUTED), (cursor_x, cursor_y + 8))
-        self.screen.blit(self.small_font.render(f"Status: {stats.status}", True, status_color), (cursor_x, cursor_y + 30))
+        device_text = self._fit_text(f"Device: {device}", self.small_font, self.panel_rect.width - 48)
+        status_text = self._fit_text(f"Status: {stats.status}", self.small_font, self.panel_rect.width - 48)
+        self.screen.blit(self.small_font.render(device_text, True, MUTED), (cursor_x, cursor_y + 2))
+        self.screen.blit(self.small_font.render(status_text, True, status_color), (cursor_x, cursor_y + 22))
         if stats.error:
-            error_text = stats.error[:48]
-            self.screen.blit(self.small_font.render(error_text, True, EXIT_COLOR), (cursor_x, cursor_y + 52))
+            error_text = self._fit_text(stats.error, self.small_font, self.panel_rect.width - 48)
+            self.screen.blit(self.small_font.render(error_text, True, EXIT_COLOR), (cursor_x, cursor_y + 42))
         reset_armed = time.monotonic() <= self.reset_armed_until
-        reset_label = "CONFIRM RESET" if reset_armed else "RESET PROGRESS"
+        reset_label = "CONFIRM RESET" if reset_armed else "RESET"
         reset_color = EXIT_COLOR if reset_armed else RESET_COLOR
+        pause_label = "START" if stats.paused else "PAUSE"
+        pause_color = START_COLOR if stats.paused else PAUSE_COLOR
+        self._draw_button(self.pause_rect, pause_label, pause_color)
         self._draw_button(self.reset_rect, reset_label, reset_color)
         self._draw_button(self.exit_rect, "EXIT", EXIT_COLOR)
+
+    def _draw_vram_control(self, x: int, y: int, value_right: int, stats: TrainingStats) -> int:
+        self.screen.blit(self.section_font.render("VRAM LIMIT", True, MUTED), (x, y))
+        y += 26
+        input_width = 78
+        auto_width = 54
+        gap = 8
+        self.vram_auto_rect = pygame.Rect(value_right - auto_width, y - 6, auto_width, 28)
+        self.vram_input_rect = pygame.Rect(self.vram_auto_rect.x - gap - input_width, y - 6, input_width, 28)
+        self.vram_slider_rect = pygame.Rect(x, y + 4, max(60, self.vram_input_rect.x - gap - x), 8)
+        enabled = stats.total_vram_mib > 0
+        limit = self.vram_preview_mib if self.vram_preview_mib is not None else stats.vram_limit_mib
+        track_color = GRID if enabled else INPUT_COLOR
+        pygame.draw.rect(self.screen, track_color, self.vram_slider_rect, border_radius=4)
+        if enabled:
+            minimum, maximum = self._vram_range(stats)
+            ratio = (self._clamp_vram(limit, stats) - minimum) / max(1, maximum - minimum)
+            knob_x = int(self.vram_slider_rect.x + ratio * self.vram_slider_rect.width)
+            pygame.draw.circle(self.screen, ACCENT, (knob_x, self.vram_slider_rect.centery), 7)
+        input_color = ACCENT if self.vram_input_active else GRID
+        pygame.draw.rect(self.screen, INPUT_COLOR, self.vram_input_rect, border_radius=5)
+        pygame.draw.rect(self.screen, input_color, self.vram_input_rect, 1, border_radius=5)
+        if self.vram_input_active:
+            input_text = self.vram_input_value
+        elif not enabled:
+            input_text = "N/A"
+        else:
+            input_text = str(limit)
+        rendered = self.small_font.render(input_text, True, TEXT if enabled else MUTED)
+        self.screen.blit(rendered, rendered.get_rect(center=self.vram_input_rect.center))
+        auto_color = START_COLOR if stats.vram_automatic and enabled else INPUT_COLOR
+        pygame.draw.rect(self.screen, auto_color, self.vram_auto_rect, border_radius=5)
+        auto_label = self.small_font.render("AUTO", True, TEXT if enabled else MUTED)
+        self.screen.blit(auto_label, auto_label.get_rect(center=self.vram_auto_rect.center))
+        unit = self.small_font.render("MiB", True, MUTED)
+        self.screen.blit(unit, (self.vram_input_rect.x + 22, self.vram_input_rect.bottom + 1))
+        return y + 40
 
     def _handle_reset_click(self) -> None:
         now = time.monotonic()
@@ -212,18 +368,42 @@ class TetrisWindow:
         if rect.collidepoint(pygame.mouse.get_pos()):
             color = tuple(min(255, channel + 18) for channel in color)
         pygame.draw.rect(self.screen, color, rect, border_radius=8)
-        label = self.section_font.render(text, True, (255, 255, 255))
+        label = self.button_font.render(text, True, (255, 255, 255))
         self.screen.blit(label, label.get_rect(center=rect.center))
 
-    def _draw_rows(self, x: int, y: int, title: str, rows: list[tuple[str, str]]) -> int:
+    def _draw_rows(self, x: int, y: int, value_right: int, title: str, rows: list[tuple[str, str]]) -> int:
         self.screen.blit(self.section_font.render(title, True, MUTED), (x, y))
-        y += 31
+        y += 27
         for label, value in rows:
             self.screen.blit(self.text_font.render(label, True, MUTED), (x, y))
             rendered = self.text_font.render(value, True, TEXT)
-            self.screen.blit(rendered, (x + 326 - rendered.get_width(), y))
-            y += 25
+            self.screen.blit(rendered, (value_right - rendered.get_width(), y))
+            y += 22
         return y
+
+    def _vram_range(self, stats: TrainingStats) -> tuple[int, int]:
+        reserve = min(self.config.gpu_reserve_mib, stats.total_vram_mib // 4)
+        maximum = max(1, stats.total_vram_mib - reserve)
+        minimum = min(self.config.minimum_vram_limit_mib, maximum)
+        return minimum, maximum
+
+    def _clamp_vram(self, value: int, stats: TrainingStats) -> int:
+        minimum, maximum = self._vram_range(stats)
+        return min(maximum, max(minimum, value))
+
+    def _slider_value(self, mouse_x: int, stats: TrainingStats) -> int:
+        minimum, maximum = self._vram_range(stats)
+        ratio = (mouse_x - self.vram_slider_rect.x) / max(1, self.vram_slider_rect.width)
+        raw = minimum + min(1.0, max(0.0, ratio)) * (maximum - minimum)
+        return self._clamp_vram(int(round(raw / 128.0) * 128), stats)
+
+    def _fit_text(self, text: str, font: pygame.font.Font, width: int) -> str:
+        if font.size(text)[0] <= width:
+            return text
+        shortened = text
+        while shortened and font.size(shortened + "…")[0] > width:
+            shortened = shortened[:-1]
+        return shortened + "…"
 
     def _optional(self, value: float | int | None, suffix: str) -> str:
         return "N/A" if value is None else f"{value:.0f}{suffix}"

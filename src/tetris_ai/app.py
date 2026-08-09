@@ -6,7 +6,8 @@ from .checkpoint import CheckpointManager
 from .config import CONFIG
 from .gui import TetrisWindow
 from .monitor import HardwareMonitor
-from .paths import RUNTIME_PATHS, checkpoint_path
+from .paths import RUNTIME_PATHS, checkpoint_path, settings_path
+from .settings import SettingsManager
 from .state import SharedTrainingState
 from .trainer import Trainer
 
@@ -39,7 +40,8 @@ def run() -> int:
         generation_limit = 1
     shared = SharedTrainingState()
     manager = CheckpointManager(checkpoint_path())
-    trainer = Trainer(config, manager, shared)
+    settings = SettingsManager(settings_path())
+    trainer = Trainer(config, manager, shared, settings)
     if arguments.headless:
         trainer.run(generation_limit=generation_limit)
         return 1 if shared.snapshot().error else 0
@@ -48,7 +50,16 @@ def run() -> int:
         trainer.thread.join(0.01)
     monitor = HardwareMonitor(trainer.device, config.hardware_monitor_interval)
     monitor.start()
-    window = TetrisWindow(config, shared, monitor, trainer.spec, trainer.request_reset)
+    window = TetrisWindow(
+        config,
+        shared,
+        monitor,
+        trainer.spec,
+        trainer.request_reset,
+        trainer.request_pause,
+        trainer.request_resume,
+        trainer.request_vram_limit,
+    )
     try:
         window.run()
     except KeyboardInterrupt:

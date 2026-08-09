@@ -47,6 +47,18 @@ def build_rotations(cells: tuple[tuple[int, int], ...]) -> tuple[tuple[tuple[int
 ROTATIONS = {piece: build_rotations(cells) for piece, cells in BASE_SHAPES.items()}
 
 
+def piece_sequence(seed: int, count: int) -> list[Tetromino]:
+    generator = random.Random(seed)
+    sequence = []
+    bag: list[Tetromino] = []
+    while len(sequence) < count:
+        if not bag:
+            bag = list(Tetromino)
+            generator.shuffle(bag)
+        sequence.append(bag.pop())
+    return sequence
+
+
 @dataclass(frozen=True)
 class Placement:
     piece: Tetromino

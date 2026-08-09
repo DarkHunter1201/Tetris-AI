@@ -1,6 +1,6 @@
 import unittest
 
-from tetris_ai.engine import ROTATIONS, TetrisGame, Tetromino
+from tetris_ai.engine import ROTATIONS, TetrisGame, Tetromino, piece_sequence
 
 
 class EngineTests(unittest.TestCase):
@@ -18,6 +18,23 @@ class EngineTests(unittest.TestCase):
         for rotation in rotations:
             self.assertEqual(min(x for x, _ in rotation), 0)
             self.assertEqual(min(y for _, y in rotation), 0)
+
+    def test_action_selects_rotated_i_piece(self):
+        game = TetrisGame(seed=5)
+        game.current_piece = Tetromino.I
+        action = game.width
+        placement = game.placement_for_action(action)
+        self.assertIsNotNone(placement)
+        self.assertEqual(placement.rotation, 1)
+        game.apply_action(action)
+        self.assertEqual(sum(game.board[y][0] for y in range(game.height)), 4)
+        self.assertEqual(sum(game.board[-1]), 1)
+
+    def test_piece_sequence_uses_fair_seven_bags(self):
+        sequence = piece_sequence(33, 14)
+        expected = set(Tetromino)
+        self.assertEqual(set(sequence[:7]), expected)
+        self.assertEqual(set(sequence[7:]), expected)
 
     def test_completed_lines_are_cleared(self):
         game = TetrisGame(seed=2)

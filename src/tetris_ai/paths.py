@@ -67,3 +67,7 @@ def safe_clear_runtime_directory(name: str) -> None:
 
 def checkpoint_path() -> Path:
     return ensure_inside_project(RUNTIME_PATHS["checkpoints"] / "training.pt")
+
+
+def settings_path() -> Path:
+    return ensure_inside_project(RUNTIME_PATHS["data"] / "settings.json")
