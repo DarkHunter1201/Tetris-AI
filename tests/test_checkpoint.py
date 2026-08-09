@@ -40,6 +40,15 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(loaded.best_lines, 3)
         self.assertFalse(self.manager.path.with_suffix(".pt.tmp").exists())
 
+    def test_delete_removes_checkpoint_and_temporary_file(self):
+        self.manager.path.touch()
+        temporary = self.manager.path.with_suffix(".pt.tmp")
+        temporary.touch()
+        self.assertTrue(self.manager.delete())
+        self.assertFalse(self.manager.path.exists())
+        self.assertFalse(temporary.exists())
+        self.assertFalse(self.manager.delete())
+
 
 if __name__ == "__main__":
     unittest.main()

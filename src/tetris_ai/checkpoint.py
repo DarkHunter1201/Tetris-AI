@@ -6,6 +6,7 @@ from typing import Any
 import torch
 
 from .network import NetworkSpec
+from .paths import ensure_inside_project
 
 
 @dataclass
@@ -58,3 +59,13 @@ class CheckpointManager:
             evolution_settings=dict(payload["evolution_settings"]),
             random_state=payload["random_state"],
         )
+
+    def delete(self) -> bool:
+        removed = False
+        targets = (self.path, self.path.with_suffix(self.path.suffix + ".tmp"))
+        for target in targets:
+            safe_target = ensure_inside_project(target)
+            if safe_target.exists():
+                safe_target.unlink()
+                removed = True
+        return removed

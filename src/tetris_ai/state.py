@@ -39,6 +39,13 @@ class SharedTrainingState:
             self.best_genome = immutable
             self.stats = replace(self.stats, genome_revision=revision, **values)
 
+    def reset_training(self, genome: torch.Tensor, device: str) -> None:
+        immutable = genome.detach().cpu().clone()
+        with self.lock:
+            revision = self.stats.genome_revision + 1
+            self.best_genome = immutable
+            self.stats = TrainingStats(status="Training · fresh start", device=device, genome_revision=revision)
+
     def genome_snapshot(self) -> tuple[torch.Tensor | None, int]:
         with self.lock:
             genome = None if self.best_genome is None else self.best_genome.clone()

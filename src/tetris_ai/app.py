@@ -48,7 +48,7 @@ def run() -> int:
         trainer.thread.join(0.01)
     monitor = HardwareMonitor(trainer.device, config.hardware_monitor_interval)
     monitor.start()
-    window = TetrisWindow(config, shared, monitor, trainer.spec)
+    window = TetrisWindow(config, shared, monitor, trainer.spec, trainer.request_reset)
     try:
         window.run()
     except KeyboardInterrupt:

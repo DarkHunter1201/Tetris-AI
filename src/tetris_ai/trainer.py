@@ -18,6 +18,7 @@ class Trainer:
         self.checkpoint_manager = checkpoint_manager
         self.shared = shared
         self.stop_event = threading.Event()
+        self.reset_event = threading.Event()
         self.thread: threading.Thread | None = None
         state_size = config.board_width * config.board_height + 7 + config.board_width + 3
         self.spec = NetworkSpec((state_size, *config.hidden_sizes, config.output_size))
@@ -46,6 +47,11 @@ class Trainer:
     def request_stop(self) -> None:
         self.stop_event.set()
 
+    def request_reset(self) -> None:
+        if not self.stop_event.is_set():
+            self.shared.update(status="Reset requested")
+            self.reset_event.set()
+
     def join(self, timeout: float | None = None) -> None:
         if self.thread is not None:
             self.thread.join(timeout)
@@ -58,7 +64,7 @@ class Trainer:
             self.shared.publish_best(self.best_genome, status="Training")
             return
         if checkpoint.network_spec != self.spec:
-            raise ValueError("Checkpoint network architecture does not match version 1.0.0 alpha")
+            raise ValueError("Checkpoint network architecture does not match version 1.0.1 alpha")
         if checkpoint.population.shape[0] != self.config.population_size:
             raise ValueError("Checkpoint population size does not equal 1500")
         self.population = checkpoint.population
@@ -85,10 +91,15 @@ class Trainer:
             self._load_or_create()
             completed = 0
             while not self.stop_event.is_set() and (generation_limit is None or completed < generation_limit):
+                if self.reset_event.is_set():
+                    self._reset_training()
                 self.generation += 1
                 fitness, scores, lines = self.evaluate_generation()
                 if self.stop_event.is_set():
                     break
+                if self.reset_event.is_set():
+                    self._reset_training()
+                    continue
                 best_index = int(torch.argmax(fitness).item())
                 current_fitness = float(fitness[best_index].item())
                 if current_fitness > self.best_fitness:
@@ -122,6 +133,11 @@ class Trainer:
             logger.exception("Training worker failed")
             self.shared.update(status="Error", error=f"{type(error).__name__}: {error}")
         finally:
+            if self.reset_event.is_set():
+                try:
+                    self._reset_training()
+                except Exception:
+                    logger.exception("Training reset during shutdown failed")
             if self.population is not None and self.best_genome is not None:
                 try:
                     self.save_checkpoint()
@@ -139,7 +155,7 @@ class Trainer:
         ]
         chunk_size = self.config.evaluation_chunk_size
         for piece_round in range(self.config.max_pieces_per_game):
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() or self.reset_event.is_set():
                 break
             active = [index for index, game in enumerate(games) if not game.game_over]
             if not active:
@@ -151,7 +167,7 @@ class Trainer:
             )
             cursor = 0
             while cursor < len(active):
-                if self.stop_event.is_set():
+                if self.stop_event.is_set() or self.reset_event.is_set():
                     break
                 indices = active[cursor:cursor + chunk_size]
                 try:
@@ -183,6 +199,22 @@ class Trainer:
                 continue
             action = max(legal, key=lambda candidate: float(logits[row, candidate]))
             game.apply_action(action)
+
+    def _reset_training(self) -> None:
+        logging.getLogger(__name__).info("Resetting training progress")
+        self.shared.update(status="Resetting progress")
+        self.checkpoint_manager.delete()
+        self.generator.manual_seed(self.config.seed)
+        self.population = initial_population(self.spec, self.settings, self.config.seed)
+        self.generation = 0
+        self.best_genome = self.population[0].clone()
+        self.best_fitness = float("-inf")
+        self.best_score = 0
+        self.best_lines = 0
+        self.reset_event.clear()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        self.shared.reset_training(self.best_genome, self.device_label())
 
     def save_checkpoint(self) -> None:
         if self.population is None or self.best_genome is None:

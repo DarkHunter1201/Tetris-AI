@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AppConfig:
-    version: str = "1.0.0 alpha"
+    version: str = "1.0.1 alpha"
     board_width: int = 10
     board_height: int = 20
     population_size: int = 1500

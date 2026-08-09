@@ -1,5 +1,6 @@
 import time
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API", category=UserWarning)
@@ -22,6 +23,7 @@ TEXT = (225, 231, 244)
 MUTED = (143, 154, 177)
 ACCENT = (80, 200, 255)
 EXIT_COLOR = (224, 72, 91)
+RESET_COLOR = (226, 151, 52)
 PIECE_COLORS = {
     1: (66, 214, 230),
     2: (244, 205, 70),
@@ -87,10 +89,12 @@ class DemoController:
 
 
 class TetrisWindow:
-    def __init__(self, config: AppConfig, shared: SharedTrainingState, monitor: HardwareMonitor, spec: NetworkSpec):
+    def __init__(self, config: AppConfig, shared: SharedTrainingState, monitor: HardwareMonitor, spec: NetworkSpec, reset_training: Callable[[], None]):
         self.config = config
         self.shared = shared
         self.monitor = monitor
+        self.reset_training = reset_training
+        self.reset_armed_until = 0.0
         self.demo = DemoController(config, spec, shared)
         pygame.init()
         pygame.display.set_caption(f"Tetris AI {config.version}")
@@ -106,7 +110,10 @@ class TetrisWindow:
         self.section_font = pygame.font.SysFont("segoeui", 18, bold=True)
         self.text_font = pygame.font.SysFont("consolas", 16)
         self.small_font = pygame.font.SysFont("segoeui", 14)
-        self.exit_rect = pygame.Rect(self.margin * 2 + self.board_width + 28, self.size[1] - 76, self.panel_width - 56, 48)
+        button_x = self.margin * 2 + self.board_width + 28
+        button_y = self.size[1] - 76
+        self.reset_rect = pygame.Rect(button_x, button_y, 210, 48)
+        self.exit_rect = pygame.Rect(button_x + 222, button_y, 112, 48)
 
     def run(self) -> None:
         running = True
@@ -114,8 +121,11 @@ class TetrisWindow:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.exit_rect.collidepoint(event.pos):
-                    running = False
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if self.reset_rect.collidepoint(event.pos):
+                        self._handle_reset_click()
+                    if self.exit_rect.collidepoint(event.pos):
+                        running = False
             self.demo.update()
             self.draw()
             pygame.display.flip()
@@ -184,11 +194,26 @@ class TetrisWindow:
         if stats.error:
             error_text = stats.error[:48]
             self.screen.blit(self.small_font.render(error_text, True, EXIT_COLOR), (cursor_x, cursor_y + 52))
-        mouse_over = self.exit_rect.collidepoint(pygame.mouse.get_pos())
-        color = (242, 87, 105) if mouse_over else EXIT_COLOR
-        pygame.draw.rect(self.screen, color, self.exit_rect, border_radius=8)
-        label = self.section_font.render("EXIT", True, (255, 255, 255))
-        self.screen.blit(label, label.get_rect(center=self.exit_rect.center))
+        reset_armed = time.monotonic() <= self.reset_armed_until
+        reset_label = "CONFIRM RESET" if reset_armed else "RESET PROGRESS"
+        reset_color = EXIT_COLOR if reset_armed else RESET_COLOR
+        self._draw_button(self.reset_rect, reset_label, reset_color)
+        self._draw_button(self.exit_rect, "EXIT", EXIT_COLOR)
+
+    def _handle_reset_click(self) -> None:
+        now = time.monotonic()
+        if now <= self.reset_armed_until:
+            self.reset_armed_until = 0.0
+            self.reset_training()
+            return
+        self.reset_armed_until = now + 3.0
+
+    def _draw_button(self, rect: pygame.Rect, text: str, color: tuple[int, int, int]) -> None:
+        if rect.collidepoint(pygame.mouse.get_pos()):
+            color = tuple(min(255, channel + 18) for channel in color)
+        pygame.draw.rect(self.screen, color, rect, border_radius=8)
+        label = self.section_font.render(text, True, (255, 255, 255))
+        self.screen.blit(label, label.get_rect(center=rect.center))
 
     def _draw_rows(self, x: int, y: int, title: str, rows: list[tuple[str, str]]) -> int:
         self.screen.blit(self.section_font.render(title, True, MUTED), (x, y))
