@@ -1,0 +1,13 @@
+.venv/
+.runtime/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+*.egg-info/

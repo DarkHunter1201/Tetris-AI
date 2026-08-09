@@ -1,0 +1,6 @@
+setuptools<81
+torch==2.12.1
+numpy==2.5.1
+pygame==2.6.1
+psutil==7.0.0
+nvidia-ml-py==13.580.82
