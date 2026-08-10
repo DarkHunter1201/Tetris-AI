@@ -59,6 +59,7 @@ def run() -> int:
         trainer.request_pause,
         trainer.request_resume,
         trainer.request_vram_limit,
+        trainer.request_population_size,
     )
     try:
         window.run()

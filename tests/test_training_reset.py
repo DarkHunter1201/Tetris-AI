@@ -49,19 +49,29 @@ class TrainingResetTests(unittest.TestCase):
             random_state=self.trainer.generator.get_state(),
         )
         self.manager.save(checkpoint)
-        self.trainer._reset_training()
+        temporary = self.manager.path.with_suffix(".pt.tmp")
+        temporary.touch()
+        old_genome = self.trainer.best_genome.clone()
+        with patch("tetris_ai.trainer.secrets.randbits", return_value=123456):
+            self.trainer._reset_training()
         stats = self.shared.snapshot()
+        shared_genome, _ = self.shared.genome_snapshot()
         self.assertFalse(self.manager.path.exists())
+        self.assertFalse(temporary.exists())
         self.assertEqual(self.trainer.generation, 0)
         self.assertEqual(self.trainer.best_fitness, float("-inf"))
         self.assertEqual(self.trainer.best_score, 0)
         self.assertEqual(self.trainer.best_lines, 0)
         self.assertEqual(self.trainer.population.shape[0], 8)
         self.assertFalse(torch.equal(self.trainer.population, old_population))
+        self.assertFalse(torch.equal(self.trainer.best_genome, old_genome))
+        self.assertTrue(torch.equal(shared_genome, self.trainer.best_genome.cpu()))
         self.assertEqual(stats.generation, 0)
         self.assertEqual(stats.all_time_best_fitness, 0.0)
         self.assertEqual(stats.best_score, 0)
         self.assertEqual(stats.best_lines, 0)
+        self.assertEqual(stats.evaluated_agents, 0)
+        self.assertEqual(stats.rotation_rate, 0.0)
         self.assertEqual(stats.status, "Training · fresh start")
 
     def test_reset_request_sets_worker_event(self):
@@ -78,6 +88,18 @@ class TrainingResetTests(unittest.TestCase):
         self.trainer.request_resume()
         self.assertFalse(self.trainer.pause_event.is_set())
         self.assertFalse(self.shared.snapshot().paused)
+
+    def test_agent_count_request_resets_with_new_population(self):
+        self.trainer.request_population_size(3)
+        self.assertTrue(self.trainer.pause_event.is_set())
+        self.assertTrue(self.trainer.reset_event.is_set())
+        self.trainer._apply_pending_population_size()
+        with patch("tetris_ai.trainer.secrets.randbits", return_value=654321):
+            self.trainer._reset_training()
+        self.assertEqual(self.trainer.population_size, 3)
+        self.assertEqual(self.trainer.population.shape[0], 3)
+        self.assertEqual(self.trainer.settings.population_size, 3)
+        self.assertEqual(self.shared.snapshot().population_size, 3)
 
     def test_reset_stays_paused_until_start(self):
         cpu = DeviceProfile(torch.device("cpu"), "CPU", 0, 0, True)

@@ -67,6 +67,26 @@ class Placement:
     y: int
 
 
+@dataclass(frozen=True)
+class RuleWeights:
+    completed_lines: float = 12.0
+    aggregate_height: float = 0.45
+    holes: float = 5.0
+    bumpiness: float = 0.3
+    maximum_height: float = 0.8
+
+
+@dataclass(frozen=True)
+class FitnessWeights:
+    completed_lines: float = 1200.0
+    placed_pieces: float = 0.5
+    aggregate_height: float = 1.0
+    holes: float = 25.0
+    bumpiness: float = 0.5
+    maximum_height: float = 4.0
+    game_over: float = 500.0
+
+
 class TetrisGame:
     def __init__(self, width: int = 10, height: int = 20, seed: int | None = None):
         self.width = width
@@ -133,6 +153,27 @@ class TetrisGame:
         self.lock_placement(placement)
         return True
 
+    def simulated_action(self, action: int) -> tuple[list[list[int]], int] | None:
+        placement = self.placement_for_action(action)
+        if placement is None:
+            return None
+        board = [row[:] for row in self.board]
+        shape = ROTATIONS[placement.piece][placement.rotation % len(ROTATIONS[placement.piece])]
+        for cell_x, cell_y in shape:
+            board[placement.y + cell_y][placement.x + cell_x] = int(placement.piece)
+        cleared = sum(1 for row in board if all(row))
+        remaining = [row for row in board if not all(row)]
+        board = [[0 for _ in range(self.width)] for _ in range(cleared)] + remaining
+        return board, cleared
+
+    def rule_score(self, action: int, weights: RuleWeights = RuleWeights()) -> float:
+        result = self.simulated_action(action)
+        if result is None:
+            return float("-inf")
+        board, cleared = result
+        heights, holes, bumpiness = self.board_metrics(board)
+        return cleared * weights.completed_lines - sum(heights) * weights.aggregate_height - holes * weights.holes - bumpiness * weights.bumpiness - max(heights) * weights.maximum_height
+
     def lock_placement(self, placement: Placement) -> None:
         shape = ROTATIONS[placement.piece][placement.rotation % len(ROTATIONS[placement.piece])]
         for cell_x, cell_y in shape:
@@ -173,6 +214,16 @@ class TetrisGame:
         heights = self.column_heights()
         return sum(abs(left - right) for left, right in zip(heights, heights[1:]))
 
+    def board_metrics(self, board: list[list[int]]) -> tuple[list[int], int, int]:
+        heights = []
+        holes = 0
+        for x in range(self.width):
+            top = next((y for y in range(self.height) if board[y][x]), self.height)
+            heights.append(self.height - top)
+            holes += sum(1 for y in range(top, self.height) if not board[y][x])
+        bumpiness = sum(abs(left - right) for left, right in zip(heights, heights[1:]))
+        return heights, holes, bumpiness
+
     def state_vector(self) -> list[float]:
         board = [float(bool(cell)) for row in self.board for cell in row]
         piece = [float(self.current_piece == item) for item in Tetromino]
@@ -180,8 +231,8 @@ class TetrisGame:
         features = [self.holes() / 40.0, self.bumpiness() / 40.0, max(self.column_heights()) / self.height]
         return board + piece + heights + features
 
-    def fitness(self) -> float:
-        height_penalty = sum(self.column_heights()) * 0.4
-        hole_penalty = self.holes() * 7.5
-        bump_penalty = self.bumpiness() * 0.25
-        return self.score + self.lines * 500.0 + self.pieces * 1.5 - height_penalty - hole_penalty - bump_penalty
+    def fitness(self, weights: FitnessWeights = FitnessWeights()) -> float:
+        heights = self.column_heights()
+        penalty = sum(heights) * weights.aggregate_height + self.holes() * weights.holes + self.bumpiness() * weights.bumpiness + max(heights) * weights.maximum_height
+        terminal = weights.game_over if self.game_over else 0.0
+        return self.score + self.lines * weights.completed_lines + self.pieces * weights.placed_pieces - penalty - terminal

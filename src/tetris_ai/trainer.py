@@ -1,4 +1,5 @@
 import logging
+import secrets
 import threading
 
 import torch
@@ -20,26 +21,21 @@ class Trainer:
         self.checkpoint_manager = checkpoint_manager
         self.shared = shared
         self.settings_manager = settings_manager
-        self.runtime_settings = settings_manager.load() if settings_manager is not None else RuntimeSettings(config.neural_network_vram_limit_mib)
+        self.runtime_settings = settings_manager.load() if settings_manager is not None else RuntimeSettings(config.neural_network_vram_limit_mib, config.population_size)
+        self.population_size = self.runtime_settings.population_size or config.population_size
         self.stop_event = threading.Event()
         self.reset_event = threading.Event()
         self.pause_event = threading.Event()
         self.control_event = threading.Event()
         self.control_lock = threading.Lock()
         self.pending_vram_limit_mib: int | None = None
+        self.pending_population_size: int | None = None
         self.thread: threading.Thread | None = None
         state_size = config.board_width * config.board_height + 7 + config.board_width + 3
         self.spec = NetworkSpec((state_size, *config.hidden_sizes, config.output_size))
         if config.output_size != config.board_width * 4:
             raise ValueError("Network output size must equal four rotations times board width")
-        self.settings = EvolutionSettings(
-            population_size=config.population_size,
-            elite_count=config.elite_count,
-            parent_pool_size=config.parent_pool_size,
-            mutation_rate=config.mutation_rate,
-            mutation_scale=config.mutation_scale,
-            crossover_rate=config.crossover_rate,
-        )
+        self.settings = self._evolution_settings(self.population_size)
         self.generator = torch.Generator(device="cpu")
         self.generator.manual_seed(config.seed)
         self.profile = DeviceProfile(torch.device("cpu"), "CPU", 0, 0, True)
@@ -87,6 +83,16 @@ class Trainer:
         self.shared.update(status="Applying VRAM limit")
         self.control_event.set()
 
+    def request_population_size(self, population_size: int) -> None:
+        if self.stop_event.is_set():
+            return
+        with self.control_lock:
+            self.pending_population_size = max(1, int(population_size))
+        self.pause_event.set()
+        self.reset_event.set()
+        self.shared.update(status="Applying agent count", paused=True)
+        self.control_event.set()
+
     def join(self, timeout: float | None = None) -> None:
         if self.thread is not None:
             self.thread.join(timeout)
@@ -107,17 +113,32 @@ class Trainer:
             vram_limit_mib=self.profile.vram_limit_mib,
             total_vram_mib=self.profile.total_vram_mib,
             vram_automatic=self.profile.automatic,
+            population_size=self.population_size,
+        )
+
+    def _evolution_settings(self, population_size: int) -> EvolutionSettings:
+        elite_ratio = self.config.elite_count / self.config.population_size
+        parent_ratio = self.config.parent_pool_size / self.config.population_size
+        elite_count = max(1, min(population_size, int(round(population_size * elite_ratio))))
+        parent_pool_size = max(elite_count, min(population_size, int(round(population_size * parent_ratio))))
+        return EvolutionSettings(
+            population_size=population_size,
+            elite_count=elite_count,
+            parent_pool_size=parent_pool_size,
+            mutation_rate=self.config.mutation_rate,
+            mutation_scale=self.config.mutation_scale,
+            crossover_rate=self.config.crossover_rate,
         )
 
     def _recommended_chunk_size(self) -> int:
         if self.device.type != "cuda":
             return self.config.evaluation_chunk_size
         parameter_bytes = self.spec.parameter_count * 4
-        population_bytes = parameter_bytes * self.config.population_size
+        population_bytes = parameter_bytes * self.population_size
         available = self.profile.vram_limit_mib * 1024 * 1024 - population_bytes * 2 - 128 * 1024 * 1024
         per_agent = parameter_bytes * 8 + self.spec.layer_sizes[0] * 4 + self.config.board_width * self.config.board_height * 24
         estimated = max(8, int(max(0, available) / max(1, per_agent)))
-        return min(self.config.population_size, estimated)
+        return min(self.population_size, estimated)
 
     def _load_or_create(self) -> None:
         checkpoint = self.checkpoint_manager.load()
@@ -127,9 +148,14 @@ class Trainer:
             self.shared.publish_best(self.best_genome, status="Training")
             return
         if checkpoint.network_spec != self.spec:
-            raise ValueError("Checkpoint network architecture does not match version 1.1.0 beta")
-        if checkpoint.population.shape[0] != self.config.population_size:
-            raise ValueError("Checkpoint population size does not equal 1500")
+            raise ValueError("Checkpoint network architecture does not match version 1.2.0 beta")
+        if checkpoint.population.shape[0] != self.population_size:
+            logging.getLogger(__name__).info("Checkpoint agent count differs from requested count; starting fresh")
+            self.checkpoint_manager.delete()
+            self.population = initial_population(self.spec, self.settings, self.config.seed).to(self.device)
+            self.best_genome = self.population[0].clone()
+            self.shared.publish_best(self.best_genome, status="Training · new agent count", population_size=self.population_size)
+            return
         self.population = checkpoint.population.to(self.device)
         self.generation = checkpoint.generation
         self.best_genome = checkpoint.best_genome.to(self.device)
@@ -154,6 +180,7 @@ class Trainer:
             completed = 0
             while not self.stop_event.is_set() and (generation_limit is None or completed < generation_limit):
                 self._apply_pending_vram_limit()
+                self._apply_pending_population_size()
                 if self.reset_event.is_set():
                     self._reset_training()
                 self._pause_barrier()
@@ -166,6 +193,7 @@ class Trainer:
                 if self.stop_event.is_set():
                     break
                 if self.reset_event.is_set():
+                    self._apply_pending_population_size()
                     self._reset_training()
                     continue
                 best_index = int(torch.argmax(fitness).item())
@@ -205,6 +233,7 @@ class Trainer:
         finally:
             if self.reset_event.is_set():
                 try:
+                    self._apply_pending_population_size()
                     self._reset_training()
                 except Exception:
                     logger.exception("Training reset during shutdown failed")
@@ -219,7 +248,7 @@ class Trainer:
     def evaluate_generation(self) -> tuple[torch.Tensor, list[int], list[int], float]:
         if self.population is None:
             raise RuntimeError("Population is unavailable")
-        games = BatchedTetris(self.config.population_size, self.config.board_width, self.config.board_height, self.device)
+        games = BatchedTetris(self.population_size, self.config.board_width, self.config.board_height, self.device, self.config.rule_weights, self.config.fitness_weights, self.config.network_policy_weight)
         sequence = piece_sequence(self.config.seed + self.generation * 104729, self.config.max_pieces_per_game)
         chunk_size = self.chunk_size
         for piece_round, piece in enumerate(sequence):
@@ -233,7 +262,7 @@ class Trainer:
                 break
             self.shared.update(
                 generation=self.generation,
-                evaluated_agents=self.config.population_size - len(active),
+                evaluated_agents=self.population_size - len(active),
                 status=f"Training · piece {piece_round + 1}",
             )
             cursor = 0
@@ -310,9 +339,8 @@ class Trainer:
             self.config.gpu_reserve_mib,
         )
         self.chunk_size = self._recommended_chunk_size()
-        self.runtime_settings = RuntimeSettings(requested)
-        if self.settings_manager is not None:
-            self.settings_manager.save(self.runtime_settings)
+        self.runtime_settings = RuntimeSettings(requested, self.population_size)
+        self._save_runtime_settings()
         self.shared.update(
             status="Paused" if self.pause_event.is_set() else "Training",
             vram_limit_mib=self.profile.vram_limit_mib,
@@ -320,12 +348,34 @@ class Trainer:
             vram_automatic=self.profile.automatic,
         )
 
+    def _apply_pending_population_size(self) -> None:
+        with self.control_lock:
+            requested = self.pending_population_size
+            self.pending_population_size = None
+        if requested is None:
+            return
+        self.population_size = requested
+        self.settings = self._evolution_settings(requested)
+        self.chunk_size = self._recommended_chunk_size()
+        self.runtime_settings = RuntimeSettings(self.runtime_settings.vram_limit_mib, requested)
+        self._save_runtime_settings()
+        self.shared.update(population_size=requested, evaluated_agents=0, status="Resetting for new agent count", paused=True)
+
+    def _save_runtime_settings(self) -> None:
+        if self.settings_manager is not None:
+            self.settings_manager.save(self.runtime_settings)
+
     def _reset_training(self) -> None:
         logging.getLogger(__name__).info("Resetting training progress")
         self.shared.update(status="Resetting progress", paused=True)
         self.checkpoint_manager.delete()
-        self.generator.manual_seed(self.config.seed)
-        self.population = initial_population(self.spec, self.settings, self.config.seed).to(self.device)
+        reset_seed = secrets.randbits(63)
+        self.generator.manual_seed(reset_seed)
+        self.population = None
+        self.best_genome = None
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        self.population = initial_population(self.spec, self.settings, reset_seed).to(self.device)
         self.generation = 0
         self.best_genome = self.population[0].clone()
         self.best_fitness = float("-inf")
@@ -341,6 +391,7 @@ class Trainer:
             self.profile.vram_limit_mib,
             self.profile.total_vram_mib,
             self.profile.automatic,
+            self.population_size,
         )
 
     def save_checkpoint(self) -> None:

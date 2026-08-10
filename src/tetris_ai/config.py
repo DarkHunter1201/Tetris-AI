@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 
+from .engine import FitnessWeights, RuleWeights
+
 
 @dataclass(frozen=True)
 class AppConfig:
-    version: str = "1.1.0 beta"
+    version: str = "1.2.0 beta"
     board_width: int = 10
     board_height: int = 20
     population_size: int = 1500
@@ -24,6 +26,9 @@ class AppConfig:
     checkpoint_interval_generations: int = 1
     evaluation_chunk_size: int = 192
     max_pieces_per_game: int = 500
+    rule_weights: RuleWeights = RuleWeights()
+    fitness_weights: FitnessWeights = FitnessWeights()
+    network_policy_weight: float = 1.5
     seed: int = 94721
 
 

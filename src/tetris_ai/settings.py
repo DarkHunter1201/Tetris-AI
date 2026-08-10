@@ -9,6 +9,7 @@ from .paths import ensure_inside_project
 @dataclass(frozen=True)
 class RuntimeSettings:
     vram_limit_mib: int = 0
+    population_size: int = 0
 
 
 class SettingsManager:
@@ -22,7 +23,8 @@ class SettingsManager:
         try:
             values = json.loads(self.path.read_text(encoding="utf-8"))
             limit = max(0, int(values.get("vram_limit_mib", 0)))
-            return RuntimeSettings(vram_limit_mib=limit)
+            population_size = max(0, int(values.get("population_size", 0)))
+            return RuntimeSettings(vram_limit_mib=limit, population_size=population_size)
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return RuntimeSettings()
 

@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import torch
@@ -8,7 +9,7 @@ from tetris_ai.engine import TetrisGame, Tetromino, piece_sequence
 
 class BatchEngineTests(unittest.TestCase):
     def test_logits_can_select_rotated_piece(self):
-        games = BatchedTetris(4, 10, 20, torch.device("cpu"))
+        games = BatchedTetris(4, 10, 20, torch.device("cpu"), network_policy_weight=100.0)
         indices = games.active_indices()
         logits = torch.zeros((4, 40))
         logits[:, 10] = 20.0
@@ -42,7 +43,7 @@ class BatchEngineTests(unittest.TestCase):
             if not legal:
                 break
             logits = torch.randn((1, 40), generator=generator)
-            action = max(legal, key=lambda candidate: float(logits[0, candidate]))
+            action = max(legal, key=lambda candidate: scalar.rule_score(candidate) + math.tanh(float(logits[0, candidate])) * batch.network_policy_weight)
             scalar.apply_action(action)
             batch.apply_logits(batch.active_indices(), logits, piece)
             self.assertEqual(batch.boards[0].tolist(), [[bool(cell) for cell in row] for row in scalar.board])
@@ -51,6 +52,17 @@ class BatchEngineTests(unittest.TestCase):
             if scalar.game_over:
                 break
         self.assertAlmostEqual(batch.fitness().item(), scalar.fitness(), places=4)
+
+    def test_rule_aware_policy_clears_lines(self):
+        game = TetrisGame(seed=41)
+        for _ in range(100):
+            legal = game.legal_actions()
+            if not legal:
+                break
+            action = max(legal, key=game.rule_score)
+            game.apply_action(action)
+        self.assertGreaterEqual(game.lines, 20)
+        self.assertGreater(game.pieces, 70)
 
 
 if __name__ == "__main__":

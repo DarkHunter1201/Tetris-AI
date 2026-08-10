@@ -1,3 +1,4 @@
+import math
 import time
 import warnings
 from collections.abc import Callable
@@ -73,7 +74,7 @@ class DemoController:
             state = torch.tensor(self.game.state_vector(), dtype=torch.float32)
             with torch.inference_mode():
                 logits = single_forward(self.genome, state, self.spec)
-            action = max(legal, key=lambda candidate: float(logits[candidate]))
+            action = max(legal, key=lambda candidate: self.game.rule_score(candidate, self.config.rule_weights) + math.tanh(float(logits[candidate])) * self.config.network_policy_weight)
             placement = self.game.placement_for_action(action)
             if placement is not None:
                 self.falling = FallingPiece(placement, 0)
@@ -102,6 +103,7 @@ class TetrisWindow:
         pause_training: Callable[[], None],
         resume_training: Callable[[], None],
         set_vram_limit: Callable[[int], None],
+        set_population_size: Callable[[int], None],
     ):
         self.config = config
         self.shared = shared
@@ -110,12 +112,13 @@ class TetrisWindow:
         self.pause_training = pause_training
         self.resume_training = resume_training
         self.set_vram_limit = set_vram_limit
+        self.set_population_size = set_population_size
         self.reset_armed_until = 0.0
         self.demo = DemoController(config, spec, shared)
         pygame.init()
         pygame.display.set_caption(f"Tetris AI {config.version}")
-        self.minimum_size = (860, 720)
-        self.size = (920, 760)
+        self.minimum_size = (860, 780)
+        self.size = (940, 820)
         self.screen = pygame.display.set_mode(self.size, pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.title_font = pygame.font.SysFont("segoeui", 30, bold=True)
@@ -135,10 +138,14 @@ class TetrisWindow:
         self.vram_slider_rect = pygame.Rect(0, 0, 0, 0)
         self.vram_input_rect = pygame.Rect(0, 0, 0, 0)
         self.vram_auto_rect = pygame.Rect(0, 0, 0, 0)
+        self.agents_input_rect = pygame.Rect(0, 0, 0, 0)
+        self.agents_apply_rect = pygame.Rect(0, 0, 0, 0)
         self.vram_dragging = False
         self.vram_input_active = False
         self.vram_input_value = ""
         self.vram_preview_mib: int | None = None
+        self.agents_input_active = False
+        self.agents_input_value = ""
         self._layout()
 
     def run(self) -> None:
@@ -159,8 +166,11 @@ class TetrisWindow:
                     self._handle_mouse_up(stats)
                 elif event.type == pygame.MOUSEMOTION and self.vram_dragging:
                     self.vram_preview_mib = self._slider_value(event.pos[0], stats)
-                elif event.type == pygame.KEYDOWN and self.vram_input_active:
-                    self._handle_vram_key(event, stats)
+                elif event.type == pygame.KEYDOWN:
+                    if self.vram_input_active:
+                        self._handle_vram_key(event, stats)
+                    elif self.agents_input_active:
+                        self._handle_agents_key(event)
             stats = self.shared.snapshot()
             self.demo.update(stats.paused)
             self.draw(stats)
@@ -180,6 +190,15 @@ class TetrisWindow:
         if self.exit_rect.collidepoint(position):
             pygame.event.post(pygame.event.Event(pygame.QUIT))
             return
+        if self.agents_apply_rect.collidepoint(position):
+            self._apply_agent_count()
+            return
+        if self.agents_input_rect.collidepoint(position):
+            self.agents_input_active = True
+            self.vram_input_active = False
+            self.agents_input_value = str(stats.population_size)
+            return
+        self.agents_input_active = False
         if stats.total_vram_mib <= 0:
             self.vram_input_active = False
             return
@@ -190,6 +209,7 @@ class TetrisWindow:
             return
         if self.vram_input_rect.collidepoint(position):
             self.vram_input_active = True
+            self.agents_input_active = False
             self.vram_input_value = str(stats.vram_limit_mib)
             return
         self.vram_input_active = False
@@ -217,6 +237,21 @@ class TetrisWindow:
             self.vram_input_value = self.vram_input_value[:-1]
         elif event.unicode.isdigit() and len(self.vram_input_value) < 6:
             self.vram_input_value += event.unicode
+
+    def _handle_agents_key(self, event: pygame.event.Event) -> None:
+        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._apply_agent_count()
+        elif event.key == pygame.K_ESCAPE:
+            self.agents_input_active = False
+        elif event.key == pygame.K_BACKSPACE:
+            self.agents_input_value = self.agents_input_value[:-1]
+        elif event.unicode.isdigit():
+            self.agents_input_value += event.unicode
+
+    def _apply_agent_count(self) -> None:
+        if self.agents_input_value:
+            self.set_population_size(max(1, int(self.agents_input_value)))
+        self.agents_input_active = False
 
     def draw(self, stats: TrainingStats | None = None) -> None:
         self._layout()
@@ -286,7 +321,7 @@ class TetrisWindow:
             ("All-time best", self._number(stats.all_time_best_fitness)),
             ("Best score", str(stats.best_score)),
             ("Best lines", str(stats.best_lines)),
-            ("Evaluated", f"{stats.evaluated_agents} / {self.config.population_size}"),
+            ("Evaluated", f"{stats.evaluated_agents} / {stats.population_size}"),
             ("Rotated moves", f"{stats.rotation_rate:.1f} %"),
         ]
         cursor_y = self._draw_rows(cursor_x, cursor_y, value_right, "TRAINING", training_rows)
@@ -301,6 +336,7 @@ class TetrisWindow:
         ]
         cursor_y = self._draw_rows(cursor_x, cursor_y + 2, value_right, "HARDWARE", hardware_rows)
         cursor_y = self._draw_vram_control(cursor_x, cursor_y + 2, value_right, stats)
+        cursor_y = self._draw_agents_control(cursor_x, cursor_y, value_right, stats)
         device = hardware.gpu_name if stats.total_vram_mib and hardware.gpu_name else stats.device
         status_color = EXIT_COLOR if stats.error else ACCENT
         device_text = self._fit_text(f"Device: {device}", self.small_font, self.panel_rect.width - 48)
@@ -356,6 +392,28 @@ class TetrisWindow:
         self.screen.blit(unit, (self.vram_input_rect.x + 22, self.vram_input_rect.bottom + 1))
         return y + 40
 
+    def _draw_agents_control(self, x: int, y: int, value_right: int, stats: TrainingStats) -> int:
+        self.screen.blit(self.section_font.render("AGENTS PER GENERATION", True, MUTED), (x, y))
+        y += 26
+        apply_width = 62
+        input_width = 112
+        gap = 8
+        self.agents_apply_rect = pygame.Rect(value_right - apply_width, y - 6, apply_width, 28)
+        self.agents_input_rect = pygame.Rect(self.agents_apply_rect.x - gap - input_width, y - 6, input_width, 28)
+        pygame.draw.rect(self.screen, INPUT_COLOR, self.agents_input_rect, border_radius=5)
+        border = ACCENT if self.agents_input_active else GRID
+        pygame.draw.rect(self.screen, border, self.agents_input_rect, 1, border_radius=5)
+        value = self.agents_input_value if self.agents_input_active else str(stats.population_size)
+        value = self._fit_number(value, self.small_font, self.agents_input_rect.width - 8)
+        rendered = self.small_font.render(value, True, TEXT)
+        self.screen.blit(rendered, rendered.get_rect(center=self.agents_input_rect.center))
+        pygame.draw.rect(self.screen, PAUSE_COLOR, self.agents_apply_rect, border_radius=5)
+        apply_label = self.small_font.render("APPLY", True, TEXT)
+        self.screen.blit(apply_label, apply_label.get_rect(center=self.agents_apply_rect.center))
+        warning = self.small_font.render("Applying fully resets training", True, MUTED)
+        self.screen.blit(warning, (x, y + 25))
+        return y + 47
+
     def _handle_reset_click(self) -> None:
         now = time.monotonic()
         if now <= self.reset_armed_until:
@@ -404,6 +462,14 @@ class TetrisWindow:
         while shortened and font.size(shortened + "…")[0] > width:
             shortened = shortened[:-1]
         return shortened + "…"
+
+    def _fit_number(self, text: str, font: pygame.font.Font, width: int) -> str:
+        if font.size(text)[0] <= width:
+            return text
+        shortened = text
+        while shortened and font.size("…" + shortened)[0] > width:
+            shortened = shortened[1:]
+        return "…" + shortened
 
     def _optional(self, value: float | int | None, suffix: str) -> str:
         return "N/A" if value is None else f"{value:.0f}{suffix}"

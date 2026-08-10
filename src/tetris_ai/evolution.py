@@ -28,6 +28,8 @@ def evolve_population(population: torch.Tensor, fitness: torch.Tensor, settings:
     child_count = settings.population_size - settings.elite_count
     output = torch.empty_like(population)
     output[:settings.elite_count] = elites
+    if child_count == 0:
+        return output
     batch = child_count if chunk_size is None else max(1, min(child_count, chunk_size))
     for start in range(0, child_count, batch):
         count = min(batch, child_count - start)
