@@ -51,7 +51,7 @@ class SettingsPanelTests(unittest.TestCase):
         self.panel.values["elite_count"] = "1"
         self.panel.values["parent_pool_size"] = "2"
         self.assertEqual(self.panel._apply(), "none")
-        self.assertEqual(self.panel._apply(), "applied")
+        self.assertEqual(self.panel._apply(), "applied_reset")
         self.assertEqual(self.applied[0].population_size, 2)
 
     def test_invalid_value_stays_open_and_displays_error(self):
@@ -60,7 +60,31 @@ class SettingsPanelTests(unittest.TestCase):
         self.panel._apply()
         self.assertEqual(self.panel._apply(), "none")
         self.assertTrue(self.panel.visible)
-        self.assertIn("Elite agents", self.panel.error)
+        self.assertIn("не может превышать", self.panel.error)
+
+    def test_language_choice_and_defaults_are_available_without_applying(self):
+        self.panel.draw(lambda x, y, text: None)
+        language = self.panel.field_rects["language"]
+        self.panel.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=language.center))
+        self.assertEqual(self.panel.values["language"], "en")
+        self.panel.values["board_width"] = "17"
+        self.panel.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=self.panel.defaults_rect.center))
+        self.assertEqual(self.panel.values["board_width"], "10")
+        self.assertEqual(self.panel.values["language"], "en")
+        self.assertEqual(self.applied, [])
+
+    def test_language_only_apply_does_not_request_training_reset(self):
+        self.panel.values["language"] = "en"
+        self.assertEqual(self.panel._apply(), "applied")
+        self.assertEqual(self.applied[0].overrides["language"], "en")
+
+    def test_auto_button_loads_recommendation_as_draft(self):
+        self.panel.auto_settings = lambda language: (RuntimeSettings(population_size=7), "Test PC")
+        self.panel.draw(lambda x, y, text: None)
+        self.panel.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=self.panel.auto_rect.center))
+        self.assertEqual(self.panel.values["population_size"], "7")
+        self.assertIn("Test PC", self.panel.notice)
+        self.assertEqual(self.applied, [])
 
 
 if __name__ == "__main__":

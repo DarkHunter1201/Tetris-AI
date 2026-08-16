@@ -16,6 +16,9 @@ from .network import NetworkSpec, single_forward
 from .settings import RuntimeSettings
 from .settings_panel import SettingsPanel
 from .state import SharedTrainingState, TrainingStats
+from .translations import status_text as translated_status
+from .translations import error_text as translated_error
+from .translations import text
 
 
 BACKGROUND = (12, 15, 23)
@@ -184,9 +187,10 @@ class TetrisWindow:
         )
         self._layout()
 
-    def run(self) -> bool:
+    def run(self) -> tuple[bool, bool]:
         running = True
         restart_requested = False
+        reset_requested = False
         while running:
             stats = self.shared.snapshot()
             for event in pygame.event.get():
@@ -202,8 +206,9 @@ class TetrisWindow:
                     result = self.settings_panel.handle_event(event)
                     if result == "cancel" and not self.settings_was_paused:
                         self.resume_training()
-                    elif result == "applied":
+                    elif result in ("applied", "applied_reset"):
                         restart_requested = True
+                        reset_requested = result == "applied_reset"
                         running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self._handle_mouse_down(event.pos, stats)
@@ -221,7 +226,7 @@ class TetrisWindow:
             self.draw(stats)
             pygame.display.flip()
             self.clock.tick(self.config.visualization_fps)
-        return restart_requested
+        return restart_requested, reset_requested
 
     def _handle_mouse_down(self, position: tuple[int, int], stats: TrainingStats) -> None:
         if self.pause_rect.collidepoint(position):
@@ -372,7 +377,7 @@ class TetrisWindow:
         cursor_y = self.panel_rect.y + 20
         self.screen.blit(self.title_font.render("Tetris AI", True, TEXT), (cursor_x, cursor_y))
         cursor_y += 38
-        self.screen.blit(self.small_font.render(f"Version {self.config.version}  ·  Neuroevolution", True, ACCENT), (cursor_x, cursor_y))
+        self.screen.blit(self.small_font.render(f"{self._t('Version')} {self.config.version}  ·  {self._t('Neuroevolution')}", True, ACCENT), (cursor_x, cursor_y))
         cursor_y += 34
         training_rows = [
             ("Generation", str(stats.generation), TRAINING_INFO["Generation"]),
@@ -398,28 +403,28 @@ class TetrisWindow:
         cursor_y = self._draw_agents_control(cursor_x, cursor_y, value_right, stats)
         device = hardware.gpu_name if stats.total_vram_mib and hardware.gpu_name else stats.device
         status_color = EXIT_COLOR if stats.error else ACCENT
-        device_text = self._fit_text(f"Device: {device}", self.small_font, self.panel_rect.width - 48)
-        status_text = self._fit_text(f"Status: {stats.status}", self.small_font, self.panel_rect.width - 48)
+        device_text = self._fit_text(f"{self._t('Device')}: {device}", self.small_font, self.panel_rect.width - 48)
+        status_text = self._fit_text(f"{self._t('Status')}: {translated_status(self.config.language, stats.status)}", self.small_font, self.panel_rect.width - 48)
         self.screen.blit(self.small_font.render(device_text, True, MUTED), (cursor_x, cursor_y + 2))
         self._draw_info_icon(value_right - 6, cursor_y + 10, "Compute device selected automatically for neural-network evaluation and evolution.")
         self.screen.blit(self.small_font.render(status_text, True, status_color), (cursor_x, cursor_y + 22))
         self._draw_info_icon(value_right - 6, cursor_y + 30, "Current lifecycle state of the training worker, including pause, evaluation, evolution, reset, and errors.")
         if stats.error:
-            error_text = self._fit_text(stats.error, self.small_font, self.panel_rect.width - 48)
-            self.screen.blit(self.small_font.render(error_text, True, EXIT_COLOR), (cursor_x, cursor_y + 42))
+            visible_error = self._fit_text(translated_error(self.config.language, stats.error), self.small_font, self.panel_rect.width - 48)
+            self.screen.blit(self.small_font.render(visible_error, True, EXIT_COLOR), (cursor_x, cursor_y + 42))
         reset_armed = time.monotonic() <= self.reset_armed_until
-        reset_label = "CONFIRM RESET" if reset_armed else "RESET"
+        reset_label = self._t("CONFIRM RESET") if reset_armed else self._t("RESET")
         reset_color = EXIT_COLOR if reset_armed else RESET_COLOR
-        pause_label = "START" if stats.paused else "PAUSE"
+        pause_label = self._t("START") if stats.paused else self._t("PAUSE")
         pause_color = START_COLOR if stats.paused else PAUSE_COLOR
         self._draw_button(self.pause_rect, pause_label, pause_color)
         self._draw_button(self.reset_rect, reset_label, reset_color)
-        self._draw_button(self.settings_rect, "SETTINGS", INPUT_COLOR)
-        self._draw_button(self.exit_rect, "EXIT", EXIT_COLOR)
+        self._draw_button(self.settings_rect, self._t("SETTINGS"), INPUT_COLOR)
+        self._draw_button(self.exit_rect, self._t("EXIT"), EXIT_COLOR)
 
     def _draw_vram_control(self, x: int, y: int, value_right: int, stats: TrainingStats) -> int:
-        self.screen.blit(self.section_font.render("VRAM LIMIT", True, MUTED), (x, y))
-        self._draw_info_icon(x + self.section_font.size("VRAM LIMIT")[0] + 12, y + 10, "Controls the maximum VRAM budget used by neural tensors. AUTO derives a safe budget from detected GPU capacity and reserve settings.")
+        self.screen.blit(self.section_font.render(self._t("VRAM LIMIT"), True, MUTED), (x, y))
+        self._draw_info_icon(x + self.section_font.size(self._t("VRAM LIMIT"))[0] + 12, y + 10, "Controls the maximum VRAM budget used by neural tensors. AUTO derives a safe budget from detected GPU capacity and reserve settings.")
         y += 26
         input_width = 78
         auto_width = 54
@@ -442,22 +447,22 @@ class TetrisWindow:
         if self.vram_input_active:
             input_text = self.vram_input_value
         elif not enabled:
-            input_text = "N/A"
+            input_text = self._t("N/A")
         else:
             input_text = str(limit)
         rendered = self.small_font.render(input_text, True, TEXT if enabled else MUTED)
         self.screen.blit(rendered, rendered.get_rect(center=self.vram_input_rect.center))
         auto_color = START_COLOR if stats.vram_automatic and enabled else INPUT_COLOR
         pygame.draw.rect(self.screen, auto_color, self.vram_auto_rect, border_radius=5)
-        auto_label = self.small_font.render("AUTO", True, TEXT if enabled else MUTED)
+        auto_label = self.small_font.render(self._t("AUTO"), True, TEXT if enabled else MUTED)
         self.screen.blit(auto_label, auto_label.get_rect(center=self.vram_auto_rect.center))
         unit = self.small_font.render("MiB", True, MUTED)
         self.screen.blit(unit, (self.vram_input_rect.x + 22, self.vram_input_rect.bottom + 1))
         return y + 40
 
     def _draw_agents_control(self, x: int, y: int, value_right: int, stats: TrainingStats) -> int:
-        self.screen.blit(self.section_font.render("AGENTS PER GENERATION", True, MUTED), (x, y))
-        self._draw_info_icon(x + self.section_font.size("AGENTS PER GENERATION")[0] + 12, y + 10, "Controls population size. Applying a new value starts fresh because populations of different sizes cannot share one checkpoint safely.")
+        self.screen.blit(self.section_font.render(self._t("AGENTS PER GENERATION"), True, MUTED), (x, y))
+        self._draw_info_icon(x + self.section_font.size(self._t("AGENTS PER GENERATION"))[0] + 12, y + 10, "Controls population size. Applying a new value starts fresh because populations of different sizes cannot share one checkpoint safely.")
         y += 26
         apply_width = 62
         input_width = 112
@@ -472,9 +477,9 @@ class TetrisWindow:
         rendered = self.small_font.render(value, True, TEXT)
         self.screen.blit(rendered, rendered.get_rect(center=self.agents_input_rect.center))
         pygame.draw.rect(self.screen, PAUSE_COLOR, self.agents_apply_rect, border_radius=5)
-        apply_label = self.small_font.render("APPLY", True, TEXT)
+        apply_label = self.small_font.render(self._t("APPLY"), True, TEXT)
         self.screen.blit(apply_label, apply_label.get_rect(center=self.agents_apply_rect.center))
-        warning = self.small_font.render("Applying fully resets training", True, MUTED)
+        warning = self.small_font.render(self._t("Applying fully resets training"), True, MUTED)
         self.screen.blit(warning, (x, y + 25))
         return y + 47
 
@@ -490,14 +495,15 @@ class TetrisWindow:
         if rect.collidepoint(pygame.mouse.get_pos()):
             color = tuple(min(255, channel + 18) for channel in color)
         pygame.draw.rect(self.screen, color, rect, border_radius=8)
-        label = self.button_font.render(text, True, (255, 255, 255))
+        font = self.button_font if self.button_font.size(text)[0] <= rect.width - 10 else self.small_font
+        label = font.render(text, True, (255, 255, 255))
         self.screen.blit(label, label.get_rect(center=rect.center))
 
     def _draw_rows(self, x: int, y: int, value_right: int, title: str, rows: list[tuple[str, str, str]]) -> int:
-        self.screen.blit(self.section_font.render(title, True, MUTED), (x, y))
+        self.screen.blit(self.section_font.render(self._t(title), True, MUTED), (x, y))
         y += 27
         for label, value, description in rows:
-            rendered_label = self.text_font.render(label, True, MUTED)
+            rendered_label = self.text_font.render(self._t(label), True, MUTED)
             self.screen.blit(rendered_label, (x, y))
             self._draw_info_icon(x + rendered_label.get_width() + 12, y + 8, description)
             rendered = self.text_font.render(value, True, TEXT)
@@ -512,7 +518,7 @@ class TetrisWindow:
         pygame.draw.circle(self.screen, MUTED, (center_x, center_y), 6, 1)
         glyph = self.small_font.render("i", True, MUTED)
         self.screen.blit(glyph, glyph.get_rect(center=(center_x, center_y - 1)))
-        self.info_targets.append((rect, description))
+        self.info_targets.append((rect, self._t(description)))
 
     def _draw_hover_tooltip(self) -> None:
         mouse = pygame.mouse.get_pos()
@@ -576,15 +582,18 @@ class TetrisWindow:
         return "…" + shortened
 
     def _optional(self, value: float | int | None, suffix: str) -> str:
-        return "N/A" if value is None else f"{value:.0f}{suffix}"
+        return self._t("N/A") if value is None else f"{value:.0f}{suffix}"
 
     def _vram(self, hardware: HardwareStats) -> str:
         if hardware.total_vram_used_mib is None or hardware.total_vram_mib is None:
-            return "N/A"
+            return self._t("N/A")
         return f"{hardware.total_vram_used_mib:.0f} / {hardware.total_vram_mib:.0f} MiB"
 
     def _number(self, value: float) -> str:
         return "0" if value == float("-inf") else f"{value:.1f}"
+
+    def _t(self, source: str, **values: object) -> str:
+        return text(self.config.language, source, **values)
 
     def close(self) -> None:
         pygame.quit()

@@ -18,9 +18,11 @@ class SettingDefinition:
     description: str
     minimum: float | None = None
     maximum: float | None = None
+    options: tuple[str, ...] = ()
 
 
 SETTING_DEFINITIONS = (
+    SettingDefinition("language", "Language", "LANGUAGE", "choice", "Interface language. Click the field to switch between Russian and English; the choice is saved after applying.", options=("ru", "en")),
     SettingDefinition("board_width", "Board width", "GAME AND NETWORK", "int", "Number of columns in the Tetris board. The network input and output layers are rebuilt when this changes.", 4, 40),
     SettingDefinition("board_height", "Board height", "GAME AND NETWORK", "int", "Number of visible rows in the Tetris board. A taller board increases the network input size and GPU memory use.", 8, 80),
     SettingDefinition("population_size", "Agents per generation", "GAME AND NETWORK", "int", "Number of independently evaluated neural-network agents in one generation. More agents improve search diversity but require more memory and time.", 1),
@@ -53,7 +55,7 @@ SETTING_DEFINITIONS = (
     SettingDefinition("gpu_reserve_mib", "GPU reserve", "CUDA AND MEMORY", "int", "MiB kept outside the neural budget for the display, driver, and other applications.", 0),
     SettingDefinition("visualization_fps", "Interface FPS", "INTERFACE AND MONITORING", "int", "Maximum interface refresh rate. It does not change training speed directly.", 1, 360),
     SettingDefinition("visualization_drop_interval", "Demo drop interval", "INTERFACE AND MONITORING", "float", "Seconds between visible falling-piece steps in the demonstration board.", 0.001, 10),
-    SettingDefinition("hardware_monitor_interval", "Hardware polling interval", "INTERFACE AND MONITORING", "float", "Seconds between CPU, RAM, GPU, temperature, and VRAM measurements.", 0.1, 60),
+    SettingDefinition("hardware_monitor_interval", "Hardware polling interval", "INTERFACE AND MONITORING", "float", "Seconds between CPU, RAM, GPU, temperature, and VRAM measurements. The minimum is 1.5 seconds.", 1.5, 60),
 )
 
 
@@ -147,14 +149,18 @@ def _parse_value(definition: SettingDefinition, text: str) -> Any:
             value: Any = int(stripped)
         elif definition.value_type == "float":
             value = float(stripped.replace(",", "."))
-        else:
+        elif definition.value_type == "int_tuple":
             parts = [part.strip() for part in stripped.split(",") if part.strip()]
             value = tuple(int(part) for part in parts)
             if not value or len(value) > 8 or any(item < 1 or item > 4096 for item in value):
                 raise ValueError
+        else:
+            value = stripped.lower()
+            if value not in definition.options:
+                raise ValueError
     except (TypeError, ValueError, OverflowError):
         raise ValueError(f"Invalid value for {definition.label}") from None
-    scalar = float(value) if definition.value_type != "int_tuple" else None
+    scalar = float(value) if definition.value_type in ("int", "float") else None
     if scalar is not None and not math.isfinite(scalar):
         raise ValueError(f"Invalid value for {definition.label}")
     if scalar is not None and definition.minimum is not None and scalar < definition.minimum:
@@ -185,6 +191,12 @@ class SettingsManager:
             overrides = values.get("overrides", {})
             if not isinstance(overrides, dict):
                 overrides = {}
+            if "hardware_monitor_interval" in overrides:
+                try:
+                    if float(overrides["hardware_monitor_interval"]) < 1.5:
+                        overrides["hardware_monitor_interval"] = 1.5
+                except (TypeError, ValueError):
+                    overrides.pop("hardware_monitor_interval", None)
             runtime = RuntimeSettings(limit, population_size, overrides)
             try:
                 apply_runtime_settings(CONFIG, runtime)

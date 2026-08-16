@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tetris-ai"
-version = "1.2.1rc1"
+version = "1.2.2rc1"
 description = "Neuroevolutionary Tetris training visualizer"
 requires-python = ">=3.10"
 dependencies = [

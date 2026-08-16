@@ -42,7 +42,7 @@ if errorlevel 1 goto install_error
 ".venv\Scripts\python.exe" -W "ignore:pkg_resources is deprecated as an API:UserWarning" -c "import pygame, psutil, pynvml, torch, tetris_ai; print('Tetris AI', tetris_ai.__version__); print('PyTorch', torch.__version__); print('CUDA', torch.cuda.is_available())"
 if errorlevel 1 goto import_error
 echo.
-echo Установка Tetris AI 1.2.1 rc успешно завершена.
+echo Установка Tetris AI 1.2.2 rc успешно завершена.
 echo Теперь запустите файл "Запустить Tetris AI.bat".
 pause
 exit /b 0

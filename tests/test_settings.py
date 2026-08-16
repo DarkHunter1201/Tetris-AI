@@ -58,6 +58,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_all_values_parse_save_and_apply(self):
         values = setting_values(CONFIG)
+        values["language"] = "en"
         values["board_width"] = "12"
         values["population_size"] = "2048"
         values["hidden_sizes"] = "128, 80, 32"
@@ -76,6 +77,14 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(applied.rule_weights.holes, 7.5)
         self.assertEqual(applied.fitness_weights.completed_lines, 1500.0)
         self.assertEqual(applied.neural_network_vram_limit_mib, 9216)
+        self.assertEqual(applied.language, "en")
+
+    def test_old_sensor_interval_is_migrated_to_one_and_half_seconds(self):
+        self.manager.path.write_text('{"overrides": {"language": "en", "hardware_monitor_interval": 1.0}}', encoding="utf-8")
+        loaded = self.manager.load()
+        applied = apply_runtime_settings(CONFIG, loaded)
+        self.assertEqual(applied.hardware_monitor_interval, 1.5)
+        self.assertEqual(applied.language, "en")
 
     def test_dependency_validation_rejects_invalid_population_groups(self):
         values = setting_values(CONFIG)

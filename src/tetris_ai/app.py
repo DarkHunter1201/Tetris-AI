@@ -74,8 +74,9 @@ def run() -> int:
             save_settings,
         )
         restart_requested = False
+        reset_requested = False
         try:
-            restart_requested = window.run()
+            restart_requested, reset_requested = window.run()
         except KeyboardInterrupt:
             shared.update(status="Stopping")
         finally:
@@ -89,4 +90,5 @@ def run() -> int:
             return 1 if shared.snapshot().error else 0
         if applied_runtime is not None:
             settings.save(applied_runtime)
-        manager.delete()
+        if reset_requested:
+            manager.delete()

@@ -3,8 +3,10 @@ from collections.abc import Callable
 
 import pygame
 
-from .config import AppConfig
-from .settings import SETTING_DEFINITIONS, RuntimeSettings, parse_runtime_settings, setting_values
+from .autotune import automatic_runtime_settings
+from .config import AppConfig, CONFIG
+from .settings import SETTING_DEFINITIONS, RuntimeSettings, apply_runtime_settings, parse_runtime_settings, setting_values
+from .translations import error_text, language_name, normalize_language, text
 
 
 BACKGROUND = (12, 15, 23)
@@ -28,6 +30,7 @@ class SettingsPanel:
         small_font: pygame.font.Font,
         button_font: pygame.font.Font,
         apply_settings: Callable[[RuntimeSettings], None],
+        auto_settings: Callable[[str], tuple[RuntimeSettings, str]] = automatic_runtime_settings,
     ):
         self.screen = screen
         self.title_font = title_font
@@ -36,28 +39,35 @@ class SettingsPanel:
         self.small_font = small_font
         self.button_font = button_font
         self.apply_settings = apply_settings
+        self.auto_settings = auto_settings
         self.visible = False
         self.values: dict[str, str] = {}
+        self.original_values: dict[str, str] = {}
         self.active_key: str | None = None
         self.select_all = False
         self.scroll = 0
         self.maximum_scroll = 0
         self.error = ""
+        self.notice = ""
         self.apply_armed_until = 0.0
         self.field_rects: dict[str, pygame.Rect] = {}
         self.content_rect = pygame.Rect(0, 0, 0, 0)
         self.cancel_rect = pygame.Rect(0, 0, 0, 0)
         self.apply_rect = pygame.Rect(0, 0, 0, 0)
+        self.auto_rect = pygame.Rect(0, 0, 0, 0)
+        self.defaults_rect = pygame.Rect(0, 0, 0, 0)
 
     def update_screen(self, screen: pygame.Surface) -> None:
         self.screen = screen
 
     def open(self, config: AppConfig) -> None:
         self.values = setting_values(config)
+        self.original_values = dict(self.values)
         self.active_key = None
         self.select_all = False
         self.scroll = 0
         self.error = ""
+        self.notice = ""
         self.apply_armed_until = 0.0
         self.visible = True
 
@@ -74,6 +84,12 @@ class SettingsPanel:
             self.scroll = min(self.maximum_scroll, max(0, self.scroll + direction * 42))
             return "none"
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.auto_rect.collidepoint(event.pos):
+                self._load_automatic()
+                return "none"
+            if self.defaults_rect.collidepoint(event.pos):
+                self._load_defaults()
+                return "none"
             if self.cancel_rect.collidepoint(event.pos):
                 self.close()
                 return "cancel"
@@ -81,6 +97,14 @@ class SettingsPanel:
                 return self._apply()
             for key, rect in self.field_rects.items():
                 if rect.collidepoint(event.pos):
+                    definition = next(item for item in SETTING_DEFINITIONS if item.key == key)
+                    if definition.value_type == "choice":
+                        current = self.values.get(key, definition.options[0])
+                        index = definition.options.index(current) if current in definition.options else 0
+                        self.values[key] = definition.options[(index + 1) % len(definition.options)]
+                        self.error = ""
+                        self.notice = ""
+                        return "none"
                     self.active_key = key
                     self.select_all = True
                     self.error = ""
@@ -97,7 +121,7 @@ class SettingsPanel:
             return "cancel"
         if self.active_key is None:
             return "none"
-        keys = [definition.key for definition in SETTING_DEFINITIONS]
+        keys = [definition.key for definition in SETTING_DEFINITIONS if definition.value_type != "choice"]
         if event.key == pygame.K_TAB:
             current = keys.index(self.active_key)
             direction = -1 if event.mod & pygame.KMOD_SHIFT else 1
@@ -127,20 +151,54 @@ class SettingsPanel:
 
     def _apply(self) -> str:
         now = time.monotonic()
-        if now > self.apply_armed_until:
+        requires_reset = self._requires_reset()
+        if requires_reset and now > self.apply_armed_until:
             self.apply_armed_until = now + 4.0
-            self.error = "Press CONFIRM RESET to erase the current training and apply all values"
+            self.error = self._t("Press CONFIRM RESET to erase the current training and apply all values")
             self.active_key = None
             return "none"
         try:
             runtime = parse_runtime_settings(self.values)
             self.apply_settings(runtime)
         except (OSError, ValueError) as error:
-            self.error = str(error)
+            self.error = error_text(self._language(), str(error))
             self.apply_armed_until = 0.0
             return "none"
         self.close()
-        return "applied"
+        return "applied_reset" if requires_reset else "applied"
+
+    def _load_defaults(self) -> None:
+        language = self._language()
+        self.values = setting_values(CONFIG)
+        self.values["language"] = language
+        self.active_key = None
+        self.error = ""
+        self.notice = self._t("Default model values loaded. Press APPLY & RESET to use them.")
+        self.apply_armed_until = 0.0
+
+    def _load_automatic(self) -> None:
+        language = self._language()
+        try:
+            runtime, profile = self.auto_settings(language)
+            configured = apply_runtime_settings(CONFIG, runtime)
+            self.values = setting_values(configured)
+            self.values["language"] = language
+            self.error = ""
+            self.notice = self._t("Automatic values loaded for: {profile}. Press APPLY & RESET to use them.", profile=profile)
+        except (OSError, RuntimeError, ValueError) as error:
+            self.error = str(error)
+            self.notice = ""
+        self.active_key = None
+        self.apply_armed_until = 0.0
+
+    def _language(self) -> str:
+        return normalize_language(self.values.get("language", CONFIG.language))
+
+    def _requires_reset(self) -> bool:
+        return any(self.values.get(key) != value for key, value in self.original_values.items() if key != "language")
+
+    def _t(self, source: str, **values: object) -> str:
+        return text(self._language(), source, **values)
 
     def draw(self, draw_info: Callable[[int, int, str], None]) -> None:
         width, height = self.screen.get_size()
@@ -150,15 +208,19 @@ class SettingsPanel:
         pygame.draw.rect(self.screen, PANEL, modal, border_radius=12)
         header_x = modal.x + 28
         header_y = modal.y + 20
-        self.screen.blit(self.title_font.render("MODEL SETTINGS", True, TEXT), (header_x, header_y))
-        subtitle = "Every value is editable. Applying settings starts training from generation 0."
+        self.screen.blit(self.title_font.render(self._t("MODEL SETTINGS"), True, TEXT), (header_x, header_y))
+        subtitle = self._t("Every value is editable. Applying settings starts training from generation 0.")
         self.screen.blit(self.small_font.render(subtitle, True, ACCENT), (header_x, header_y + 40))
+        self.defaults_rect = pygame.Rect(modal.right - 178, header_y + 2, 150, 32)
+        self.auto_rect = pygame.Rect(self.defaults_rect.x - 100, header_y + 2, 90, 32)
+        self._draw_button(self.auto_rect, self._t("AUTO"), ACCENT)
+        self._draw_button(self.defaults_rect, self._t("DEFAULTS"), INPUT_COLOR)
         footer_height = 78
         self.content_rect = pygame.Rect(modal.x + 20, modal.y + 82, modal.width - 40, modal.height - 82 - footer_height)
         footer_y = self.content_rect.bottom + 12
         button_height = 42
-        self.cancel_rect = pygame.Rect(modal.right - 318, footer_y + 10, 126, button_height)
-        self.apply_rect = pygame.Rect(modal.right - 180, footer_y + 10, 152, button_height)
+        self.cancel_rect = pygame.Rect(modal.right - 374, footer_y + 10, 126, button_height)
+        self.apply_rect = pygame.Rect(modal.right - 236, footer_y + 10, 208, button_height)
         content_height = self._content_height()
         self.maximum_scroll = max(0, content_height - self.content_rect.height)
         self.scroll = min(self.maximum_scroll, max(0, self.scroll))
@@ -176,12 +238,18 @@ class SettingsPanel:
         if self.error:
             error = self._fit_text(self.error, self.small_font, max(200, self.cancel_rect.x - header_x - 16))
             self.screen.blit(self.small_font.render(error, True, EXIT_COLOR), (header_x, footer_y + 22))
+        elif self.notice:
+            notice_width = max(200, self.cancel_rect.x - header_x - 16)
+            for index, notice in enumerate(self._wrap_text(self.notice, self.small_font, notice_width, 2)):
+                self.screen.blit(self.small_font.render(notice, True, ACCENT), (header_x, footer_y + 12 + index * 18))
         else:
-            message = "Changes are stored locally in .runtime/data/settings.json"
+            message = self._t("Changing only the language keeps the current checkpoint.") if not self._requires_reset() and self.values.get("language") != self.original_values.get("language") else self._t("Changes are stored locally in .runtime/data/settings.json")
             self.screen.blit(self.small_font.render(message, True, MUTED), (header_x, footer_y + 22))
-        self._draw_button(self.cancel_rect, "CANCEL", INPUT_COLOR)
+        self._draw_button(self.cancel_rect, self._t("CANCEL"), INPUT_COLOR)
         armed = time.monotonic() <= self.apply_armed_until
-        self._draw_button(self.apply_rect, "CONFIRM RESET" if armed else "APPLY & RESET", EXIT_COLOR if armed else RESET_COLOR)
+        requires_reset = self._requires_reset()
+        label = self._t("CONFIRM RESET") if armed and requires_reset else self._t("APPLY & RESET") if requires_reset else self._t("APPLY CHANGES")
+        self._draw_button(self.apply_rect, label, EXIT_COLOR if armed and requires_reset else RESET_COLOR)
 
     def _draw_fields(self, draw_info: Callable[[int, int, str], None]) -> None:
         x = self.content_rect.x + 10
@@ -193,20 +261,22 @@ class SettingsPanel:
         for definition in SETTING_DEFINITIONS:
             if definition.category != category:
                 category = definition.category
-                self.screen.blit(self.section_font.render(category, True, MUTED), (x, y + 6))
+                self.screen.blit(self.section_font.render(self._t(category), True, MUTED), (x, y + 6))
                 y += 36
-            label = self.text_font.render(definition.label, True, TEXT)
+            label = self.text_font.render(self._t(definition.label), True, TEXT)
             rect = pygame.Rect(input_x, y + 3, input_width, 32)
             row_rect = pygame.Rect(x, y, right - x, 40)
             if row_rect.colliderect(self.content_rect):
                 self.screen.blit(label, (x, y + 9))
                 info_x = min(input_x - 18, x + label.get_width() + 14)
-                draw_info(info_x, y + 17, definition.description)
+                draw_info(info_x, y + 17, self._t(definition.description))
                 self.field_rects[definition.key] = rect
                 pygame.draw.rect(self.screen, INPUT_COLOR, rect, border_radius=5)
                 border = ACCENT if self.active_key == definition.key else GRID
                 pygame.draw.rect(self.screen, border, rect, 1, border_radius=5)
                 value = self.values.get(definition.key, "")
+                if definition.value_type == "choice":
+                    value = f"<  {language_name(self._language(), value)}  >"
                 rendered_value = self._fit_number(value, self.text_font, rect.width - 18)
                 self.screen.blit(rendered_value, (rect.x + 9, rect.y + 7))
             y += 44
@@ -219,8 +289,9 @@ class SettingsPanel:
         if rect.collidepoint(pygame.mouse.get_pos()):
             color = tuple(min(255, channel + 18) for channel in color)
         pygame.draw.rect(self.screen, color, rect, border_radius=8)
-        text = self.button_font.render(label, True, (255, 255, 255))
-        self.screen.blit(text, text.get_rect(center=rect.center))
+        font = self.button_font if self.button_font.size(label)[0] <= rect.width - 10 else self.small_font
+        rendered = font.render(label, True, (255, 255, 255))
+        self.screen.blit(rendered, rendered.get_rect(center=rect.center))
 
     def _fit_text(self, text: str, font: pygame.font.Font, width: int) -> str:
         if font.size(text)[0] <= width:
@@ -237,3 +308,22 @@ class SettingsPanel:
         while shortened and font.size("..." + shortened)[0] > width:
             shortened = shortened[1:]
         return font.render("..." + shortened, True, TEXT)
+
+    def _wrap_text(self, value: str, font: pygame.font.Font, width: int, maximum_lines: int) -> list[str]:
+        words = value.split()
+        lines: list[str] = []
+        current = ""
+        for index, word in enumerate(words):
+            candidate = word if not current else f"{current} {word}"
+            if font.size(candidate)[0] <= width:
+                current = candidate
+            elif current and len(lines) < maximum_lines - 1:
+                lines.append(current)
+                current = word
+            else:
+                remaining = " ".join(([current] if current else []) + words[index:])
+                lines.append(self._fit_text(remaining, font, width))
+                return lines
+        if current:
+            lines.append(current)
+        return lines

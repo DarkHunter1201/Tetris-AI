@@ -5,7 +5,8 @@ from .engine import FitnessWeights, RuleWeights
 
 @dataclass(frozen=True)
 class AppConfig:
-    version: str = "1.2.1 rc"
+    version: str = "1.2.2 rc"
+    language: str = "ru"
     board_width: int = 10
     board_height: int = 20
     population_size: int = 1500
@@ -22,7 +23,7 @@ class AppConfig:
     crossover_rate: float = 0.55
     visualization_fps: int = 60
     visualization_drop_interval: float = 0.055
-    hardware_monitor_interval: float = 1.0
+    hardware_monitor_interval: float = 1.5
     checkpoint_interval_generations: int = 1
     evaluation_chunk_size: int = 192
     max_pieces_per_game: int = 500
