@@ -5,7 +5,7 @@ from .engine import FitnessWeights, RuleWeights
 
 @dataclass(frozen=True)
 class AppConfig:
-    version: str = "1.2.0 beta"
+    version: str = "1.2.1 rc"
     board_width: int = 10
     board_height: int = 20
     population_size: int = 1500

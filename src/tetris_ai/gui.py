@@ -13,6 +13,8 @@ from .config import AppConfig
 from .engine import Placement, ROTATIONS, TetrisGame
 from .monitor import HardwareMonitor, HardwareStats
 from .network import NetworkSpec, single_forward
+from .settings import RuntimeSettings
+from .settings_panel import SettingsPanel
 from .state import SharedTrainingState, TrainingStats
 
 
@@ -36,6 +38,26 @@ PIECE_COLORS = {
     5: (232, 77, 92),
     6: (73, 124, 225),
     7: (239, 145, 58),
+}
+
+TRAINING_INFO = {
+    "Generation": "Number of the generation currently being evaluated. One generation tests every agent and creates the next population.",
+    "Current best": "Highest fitness reached by an agent in the current generation.",
+    "All-time best": "Highest fitness reached since the current training run began.",
+    "Best score": "Largest standard Tetris score reached by the all-time best agent.",
+    "Best lines": "Largest line-clear count reached by the all-time best agent.",
+    "Evaluated": "Agents already finished or eliminated in the current generation versus the total population.",
+    "Rotated moves": "Percentage of placements that use a non-default rotation. It helps confirm that rotations are being explored.",
+}
+
+HARDWARE_INFO = {
+    "CPU Load": "Current total processor utilization. Interface, monitoring, checkpoint work, and CPU-only training contribute to it.",
+    "RAM Load": "Percentage of system memory currently used by all applications.",
+    "GPU Load": "Current NVIDIA GPU compute utilization reported by the driver.",
+    "GPU Temp": "Current physical GPU temperature reported by NVIDIA NVML. N/A means the sensor is unavailable.",
+    "Neural VRAM": "VRAM actively allocated by PyTorch tensors compared with the configured neural memory limit.",
+    "Reserved VRAM": "VRAM reserved by PyTorch's caching allocator for fast reuse.",
+    "Total VRAM": "VRAM used by the whole system compared with the GPU's physical capacity.",
 }
 
 
@@ -104,6 +126,7 @@ class TetrisWindow:
         resume_training: Callable[[], None],
         set_vram_limit: Callable[[int], None],
         set_population_size: Callable[[int], None],
+        apply_settings: Callable[[RuntimeSettings], None],
     ):
         self.config = config
         self.shared = shared
@@ -113,6 +136,7 @@ class TetrisWindow:
         self.resume_training = resume_training
         self.set_vram_limit = set_vram_limit
         self.set_population_size = set_population_size
+        self.apply_settings = apply_settings
         self.reset_armed_until = 0.0
         self.demo = DemoController(config, spec, shared)
         pygame.init()
@@ -134,6 +158,7 @@ class TetrisWindow:
         self.panel_rect = pygame.Rect(0, 0, 0, 0)
         self.pause_rect = pygame.Rect(0, 0, 0, 0)
         self.reset_rect = pygame.Rect(0, 0, 0, 0)
+        self.settings_rect = pygame.Rect(0, 0, 0, 0)
         self.exit_rect = pygame.Rect(0, 0, 0, 0)
         self.vram_slider_rect = pygame.Rect(0, 0, 0, 0)
         self.vram_input_rect = pygame.Rect(0, 0, 0, 0)
@@ -146,10 +171,22 @@ class TetrisWindow:
         self.vram_preview_mib: int | None = None
         self.agents_input_active = False
         self.agents_input_value = ""
+        self.info_targets: list[tuple[pygame.Rect, str]] = []
+        self.settings_was_paused = False
+        self.settings_panel = SettingsPanel(
+            self.screen,
+            self.title_font,
+            self.section_font,
+            self.text_font,
+            self.small_font,
+            self.button_font,
+            self.apply_settings,
+        )
         self._layout()
 
-    def run(self) -> None:
+    def run(self) -> bool:
         running = True
+        restart_requested = False
         while running:
             stats = self.shared.snapshot()
             for event in pygame.event.get():
@@ -159,7 +196,15 @@ class TetrisWindow:
                     width = max(self.minimum_size[0], event.w)
                     height = max(self.minimum_size[1], event.h)
                     self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+                    self.settings_panel.update_screen(self.screen)
                     self._layout()
+                elif self.settings_panel.visible:
+                    result = self.settings_panel.handle_event(event)
+                    if result == "cancel" and not self.settings_was_paused:
+                        self.resume_training()
+                    elif result == "applied":
+                        restart_requested = True
+                        running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self._handle_mouse_down(event.pos, stats)
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -176,6 +221,7 @@ class TetrisWindow:
             self.draw(stats)
             pygame.display.flip()
             self.clock.tick(self.config.visualization_fps)
+        return restart_requested
 
     def _handle_mouse_down(self, position: tuple[int, int], stats: TrainingStats) -> None:
         if self.pause_rect.collidepoint(position):
@@ -186,6 +232,14 @@ class TetrisWindow:
             return
         if self.reset_rect.collidepoint(position):
             self._handle_reset_click()
+            return
+        if self.settings_rect.collidepoint(position):
+            self.settings_was_paused = stats.paused
+            if not stats.paused:
+                self.pause_training()
+            self.vram_input_active = False
+            self.agents_input_active = False
+            self.settings_panel.open(self.config)
             return
         if self.exit_rect.collidepoint(position):
             pygame.event.post(pygame.event.Event(pygame.QUIT))
@@ -256,16 +310,22 @@ class TetrisWindow:
     def draw(self, stats: TrainingStats | None = None) -> None:
         self._layout()
         current = self.shared.snapshot() if stats is None else stats
+        self.info_targets = []
+        if self.settings_panel.visible:
+            self.settings_panel.draw(self._draw_info_icon)
+            self._draw_hover_tooltip()
+            return
         self.screen.fill(BACKGROUND)
         self._draw_board()
         self._draw_panel(current, self.monitor.snapshot())
+        self._draw_hover_tooltip()
 
     def _layout(self) -> None:
         width, height = self.screen.get_size()
         self.margin = max(20, min(32, min(width, height) // 26))
         panel_width = max(410, min(510, int(width * 0.48)))
         left_width = width - panel_width - self.margin * 3
-        self.cell = max(14, min(left_width // self.config.board_width, (height - self.margin * 2) // self.config.board_height))
+        self.cell = max(4, min(left_width // self.config.board_width, (height - self.margin * 2) // self.config.board_height))
         self.board_width = self.config.board_width * self.cell
         self.board_height = self.config.board_height * self.cell
         board_x = self.margin + max(0, (left_width - self.board_width) // 2)
@@ -276,13 +336,12 @@ class TetrisWindow:
         inner_x = panel_x + 24
         inner_width = panel_width - 48
         button_y = self.panel_rect.bottom - 60
-        gap = 10
-        pause_width = 100
-        exit_width = 90
-        reset_width = inner_width - pause_width - exit_width - gap * 2
-        self.pause_rect = pygame.Rect(inner_x, button_y, pause_width, 42)
-        self.reset_rect = pygame.Rect(inner_x + pause_width + gap, button_y, reset_width, 42)
-        self.exit_rect = pygame.Rect(self.reset_rect.right + gap, button_y, exit_width, 42)
+        gap = 8
+        button_width = (inner_width - gap * 3) // 4
+        self.pause_rect = pygame.Rect(inner_x, button_y, button_width, 42)
+        self.reset_rect = pygame.Rect(self.pause_rect.right + gap, button_y, button_width, 42)
+        self.settings_rect = pygame.Rect(self.reset_rect.right + gap, button_y, button_width, 42)
+        self.exit_rect = pygame.Rect(self.settings_rect.right + gap, button_y, inner_x + inner_width - self.settings_rect.right - gap, 42)
 
     def _draw_board(self) -> None:
         origin_x, origin_y = self.board_origin
@@ -316,23 +375,23 @@ class TetrisWindow:
         self.screen.blit(self.small_font.render(f"Version {self.config.version}  ·  Neuroevolution", True, ACCENT), (cursor_x, cursor_y))
         cursor_y += 34
         training_rows = [
-            ("Generation", str(stats.generation)),
-            ("Current best", self._number(stats.current_best_fitness)),
-            ("All-time best", self._number(stats.all_time_best_fitness)),
-            ("Best score", str(stats.best_score)),
-            ("Best lines", str(stats.best_lines)),
-            ("Evaluated", f"{stats.evaluated_agents} / {stats.population_size}"),
-            ("Rotated moves", f"{stats.rotation_rate:.1f} %"),
+            ("Generation", str(stats.generation), TRAINING_INFO["Generation"]),
+            ("Current best", self._number(stats.current_best_fitness), TRAINING_INFO["Current best"]),
+            ("All-time best", self._number(stats.all_time_best_fitness), TRAINING_INFO["All-time best"]),
+            ("Best score", str(stats.best_score), TRAINING_INFO["Best score"]),
+            ("Best lines", str(stats.best_lines), TRAINING_INFO["Best lines"]),
+            ("Evaluated", f"{stats.evaluated_agents} / {stats.population_size}", TRAINING_INFO["Evaluated"]),
+            ("Rotated moves", f"{stats.rotation_rate:.1f} %", TRAINING_INFO["Rotated moves"]),
         ]
         cursor_y = self._draw_rows(cursor_x, cursor_y, value_right, "TRAINING", training_rows)
         hardware_rows = [
-            ("CPU Load", f"{hardware.cpu_load:.0f} %"),
-            ("RAM Load", f"{hardware.ram_load:.0f} %"),
-            ("GPU Load", self._optional(hardware.gpu_load, " %")),
-            ("GPU Temp", self._optional(hardware.gpu_temperature, " °C")),
-            ("Neural VRAM", f"{hardware.neural_allocated_mib:.0f} / {stats.vram_limit_mib} MiB" if stats.total_vram_mib else "N/A"),
-            ("Reserved VRAM", f"{hardware.neural_reserved_mib:.0f} MiB" if stats.total_vram_mib else "N/A"),
-            ("Total VRAM", self._vram(hardware)),
+            ("CPU Load", f"{hardware.cpu_load:.0f} %", HARDWARE_INFO["CPU Load"]),
+            ("RAM Load", f"{hardware.ram_load:.0f} %", HARDWARE_INFO["RAM Load"]),
+            ("GPU Load", self._optional(hardware.gpu_load, " %"), HARDWARE_INFO["GPU Load"]),
+            ("GPU Temp", self._optional(hardware.gpu_temperature, " °C"), HARDWARE_INFO["GPU Temp"]),
+            ("Neural VRAM", f"{hardware.neural_allocated_mib:.0f} / {stats.vram_limit_mib} MiB" if stats.total_vram_mib else "N/A", HARDWARE_INFO["Neural VRAM"]),
+            ("Reserved VRAM", f"{hardware.neural_reserved_mib:.0f} MiB" if stats.total_vram_mib else "N/A", HARDWARE_INFO["Reserved VRAM"]),
+            ("Total VRAM", self._vram(hardware), HARDWARE_INFO["Total VRAM"]),
         ]
         cursor_y = self._draw_rows(cursor_x, cursor_y + 2, value_right, "HARDWARE", hardware_rows)
         cursor_y = self._draw_vram_control(cursor_x, cursor_y + 2, value_right, stats)
@@ -342,7 +401,9 @@ class TetrisWindow:
         device_text = self._fit_text(f"Device: {device}", self.small_font, self.panel_rect.width - 48)
         status_text = self._fit_text(f"Status: {stats.status}", self.small_font, self.panel_rect.width - 48)
         self.screen.blit(self.small_font.render(device_text, True, MUTED), (cursor_x, cursor_y + 2))
+        self._draw_info_icon(value_right - 6, cursor_y + 10, "Compute device selected automatically for neural-network evaluation and evolution.")
         self.screen.blit(self.small_font.render(status_text, True, status_color), (cursor_x, cursor_y + 22))
+        self._draw_info_icon(value_right - 6, cursor_y + 30, "Current lifecycle state of the training worker, including pause, evaluation, evolution, reset, and errors.")
         if stats.error:
             error_text = self._fit_text(stats.error, self.small_font, self.panel_rect.width - 48)
             self.screen.blit(self.small_font.render(error_text, True, EXIT_COLOR), (cursor_x, cursor_y + 42))
@@ -353,10 +414,12 @@ class TetrisWindow:
         pause_color = START_COLOR if stats.paused else PAUSE_COLOR
         self._draw_button(self.pause_rect, pause_label, pause_color)
         self._draw_button(self.reset_rect, reset_label, reset_color)
+        self._draw_button(self.settings_rect, "SETTINGS", INPUT_COLOR)
         self._draw_button(self.exit_rect, "EXIT", EXIT_COLOR)
 
     def _draw_vram_control(self, x: int, y: int, value_right: int, stats: TrainingStats) -> int:
         self.screen.blit(self.section_font.render("VRAM LIMIT", True, MUTED), (x, y))
+        self._draw_info_icon(x + self.section_font.size("VRAM LIMIT")[0] + 12, y + 10, "Controls the maximum VRAM budget used by neural tensors. AUTO derives a safe budget from detected GPU capacity and reserve settings.")
         y += 26
         input_width = 78
         auto_width = 54
@@ -394,6 +457,7 @@ class TetrisWindow:
 
     def _draw_agents_control(self, x: int, y: int, value_right: int, stats: TrainingStats) -> int:
         self.screen.blit(self.section_font.render("AGENTS PER GENERATION", True, MUTED), (x, y))
+        self._draw_info_icon(x + self.section_font.size("AGENTS PER GENERATION")[0] + 12, y + 10, "Controls population size. Applying a new value starts fresh because populations of different sizes cannot share one checkpoint safely.")
         y += 26
         apply_width = 62
         input_width = 112
@@ -429,15 +493,55 @@ class TetrisWindow:
         label = self.button_font.render(text, True, (255, 255, 255))
         self.screen.blit(label, label.get_rect(center=rect.center))
 
-    def _draw_rows(self, x: int, y: int, value_right: int, title: str, rows: list[tuple[str, str]]) -> int:
+    def _draw_rows(self, x: int, y: int, value_right: int, title: str, rows: list[tuple[str, str, str]]) -> int:
         self.screen.blit(self.section_font.render(title, True, MUTED), (x, y))
         y += 27
-        for label, value in rows:
-            self.screen.blit(self.text_font.render(label, True, MUTED), (x, y))
+        for label, value, description in rows:
+            rendered_label = self.text_font.render(label, True, MUTED)
+            self.screen.blit(rendered_label, (x, y))
+            self._draw_info_icon(x + rendered_label.get_width() + 12, y + 8, description)
             rendered = self.text_font.render(value, True, TEXT)
             self.screen.blit(rendered, (value_right - rendered.get_width(), y))
             y += 22
         return y
+
+    def _draw_info_icon(self, center_x: int, center_y: int, description: str) -> None:
+        rect = pygame.Rect(center_x - 7, center_y - 7, 14, 14)
+        if not rect.colliderect(self.screen.get_clip()):
+            return
+        pygame.draw.circle(self.screen, MUTED, (center_x, center_y), 6, 1)
+        glyph = self.small_font.render("i", True, MUTED)
+        self.screen.blit(glyph, glyph.get_rect(center=(center_x, center_y - 1)))
+        self.info_targets.append((rect, description))
+
+    def _draw_hover_tooltip(self) -> None:
+        mouse = pygame.mouse.get_pos()
+        description = next((text for rect, text in reversed(self.info_targets) if rect.collidepoint(mouse)), None)
+        if description is None:
+            return
+        maximum_width = min(360, self.screen.get_width() - 32)
+        words = description.split()
+        lines: list[str] = []
+        line = ""
+        for word in words:
+            candidate = word if not line else f"{line} {word}"
+            if self.small_font.size(candidate)[0] <= maximum_width - 24:
+                line = candidate
+            else:
+                if line:
+                    lines.append(line)
+                line = word
+        if line:
+            lines.append(line)
+        width = min(maximum_width, max(self.small_font.size(item)[0] for item in lines) + 24)
+        height = len(lines) * 20 + 18
+        x = min(mouse[0] + 16, self.screen.get_width() - width - 10)
+        y = min(mouse[1] + 18, self.screen.get_height() - height - 10)
+        rect = pygame.Rect(max(10, x), max(10, y), width, height)
+        pygame.draw.rect(self.screen, (7, 9, 15), rect, border_radius=7)
+        pygame.draw.rect(self.screen, ACCENT, rect, 1, border_radius=7)
+        for index, item in enumerate(lines):
+            self.screen.blit(self.small_font.render(item, True, TEXT), (rect.x + 12, rect.y + 9 + index * 20))
 
     def _vram_range(self, stats: TrainingStats) -> tuple[int, int]:
         reserve = min(self.config.gpu_reserve_mib, stats.total_vram_mib // 4)

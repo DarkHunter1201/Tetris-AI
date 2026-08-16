@@ -148,7 +148,7 @@ class Trainer:
             self.shared.publish_best(self.best_genome, status="Training")
             return
         if checkpoint.network_spec != self.spec:
-            raise ValueError("Checkpoint network architecture does not match version 1.2.0 beta")
+            raise ValueError(f"Checkpoint network architecture does not match version {self.config.version}")
         if checkpoint.population.shape[0] != self.population_size:
             logging.getLogger(__name__).info("Checkpoint agent count differs from requested count; starting fresh")
             self.checkpoint_manager.delete()
@@ -339,7 +339,7 @@ class Trainer:
             self.config.gpu_reserve_mib,
         )
         self.chunk_size = self._recommended_chunk_size()
-        self.runtime_settings = RuntimeSettings(requested, self.population_size)
+        self.runtime_settings = RuntimeSettings(requested, self.population_size, self.runtime_settings.overrides)
         self._save_runtime_settings()
         self.shared.update(
             status="Paused" if self.pause_event.is_set() else "Training",
@@ -357,7 +357,10 @@ class Trainer:
         self.population_size = requested
         self.settings = self._evolution_settings(requested)
         self.chunk_size = self._recommended_chunk_size()
-        self.runtime_settings = RuntimeSettings(self.runtime_settings.vram_limit_mib, requested)
+        overrides = dict(self.runtime_settings.overrides)
+        overrides["elite_count"] = self.settings.elite_count
+        overrides["parent_pool_size"] = self.settings.parent_pool_size
+        self.runtime_settings = RuntimeSettings(self.runtime_settings.vram_limit_mib, requested, overrides)
         self._save_runtime_settings()
         self.shared.update(population_size=requested, evaluated_agents=0, status="Resetting for new agent count", paused=True)
 
